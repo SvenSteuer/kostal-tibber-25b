@@ -1811,6 +1811,19 @@ def controller_loop():
     last_consumption_recording = None
     consumption_recording_interval = 3600  # 1 Stunde
 
+    # v1.1.0 - Initialize SOC before first plan calculation
+    if ha_client:
+        try:
+            soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
+            soc_value = ha_client.get_state(soc_sensor)
+            if soc_value and soc_value != 'unavailable':
+                app_state['battery']['soc'] = float(soc_value)
+                logger.info(f"✓ Initial SOC loaded: {app_state['battery']['soc']:.1f}%")
+            else:
+                logger.warning(f"SOC sensor {soc_sensor} not available at startup, will retry in loop")
+        except Exception as e:
+            logger.warning(f"Could not load initial SOC: {e}")
+
     # v0.3.1 - Calculate charging plan immediately on startup
     update_charging_plan()
     last_plan_update = datetime.now()
@@ -1826,9 +1839,23 @@ def controller_loop():
                 # v0.9.0 - Calculate daily battery schedule with predictive optimization
                 if ha_client and tibber_optimizer and consumption_learner:
                     try:
-                        current_soc = float(ha_client.get_state(
-                            config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
-                        ) or 50)  # Fallback to 50% if not available
+                        # Get current SOC with proper error handling
+                        soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
+                        soc_value = ha_client.get_state(soc_sensor)
+
+                        # Convert to float with proper fallback
+                        if soc_value is None or soc_value == '' or soc_value == 'unavailable':
+                            logger.warning(f"SOC sensor {soc_sensor} unavailable, using app_state value")
+                            current_soc = app_state['battery'].get('soc', 50)
+                        else:
+                            try:
+                                current_soc = float(soc_value)
+                                if current_soc < 0 or current_soc > 100:
+                                    logger.warning(f"SOC value {current_soc}% out of range, using app_state value")
+                                    current_soc = app_state['battery'].get('soc', 50)
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid SOC value '{soc_value}', using app_state value")
+                                current_soc = app_state['battery'].get('soc', 50)
 
                         # Get Tibber prices for today + tomorrow
                         prices = []
