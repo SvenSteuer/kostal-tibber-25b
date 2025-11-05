@@ -98,7 +98,7 @@ class ForecastSolarAPI:
                     kwp=plane['kwp']
                 )
 
-                logger.debug(f"API URL: {url}")
+                logger.info(f"Fetching Plane {i+1} from Forecast.Solar: {url}")
 
                 response = requests.get(url, timeout=10)
 
@@ -132,7 +132,14 @@ class ForecastSolarAPI:
                             continue
                 else:
                     logger.warning(f"Plane {i+1}: No 'watt_hours' in API response")
-                    logger.debug(f"Response keys: {list(data.get('result', {}).keys())}")
+                    if 'result' in data:
+                        logger.warning(f"Available result keys: {list(data['result'].keys())}")
+                        # Log first 500 chars of response for debugging
+                        import json
+                        response_preview = json.dumps(data, indent=2)[:500]
+                        logger.warning(f"API response preview: {response_preview}")
+                    else:
+                        logger.warning(f"No 'result' key in response. Full response: {data}")
 
             if hourly_forecast:
                 logger.info(f"✓ Forecast.Solar: Retrieved {len(hourly_forecast)} hours from API")
