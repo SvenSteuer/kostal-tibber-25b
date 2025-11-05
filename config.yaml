@@ -1,5 +1,5 @@
 name: Kostal Battery Manager
-version: "1.0.4"
+version: "1.0.3"
 slug: kostal_battery_manager
 description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und Grafiken"
 url: "https://github.com/SvenSteuer/kostal-battery-manager"
@@ -65,15 +65,14 @@ options:
   forecast_solar_api_key: "3Ur5qvjhNRMhGhXm"
   forecast_solar_latitude: 50.992
   forecast_solar_longitude: 7.467
-  # v1.0.4 - PV Planes (individual fields, converted to array internally)
-  # Plane 1
-  plane1_declination: 22    # Roof tilt angle (0-90°)
-  plane1_azimuth: 45        # Orientation (-180 to 180°: 0=South, 90=West, -90=East)
-  plane1_kwp: 8.96          # Peak power in kWp
-  # Plane 2
-  plane2_declination: 22
-  plane2_azimuth: -135      # Second roof facing different direction
-  plane2_kwp: 10.665
+  # Define your PV planes (roof orientations)
+  forecast_solar_planes:
+    - declination: 22    # Roof tilt angle (0-90°)
+      azimuth: 45        # Orientation (-180 to 180°: 0=South, 90=West, -90=East)
+      kwp: 8.96          # Peak power in kWp
+    - declination: 22
+      azimuth: -135      # Second roof facing different direction
+      kwp: 10.665
   # v0.3.0 - Tibber Smart Charging
   tibber_price_threshold_1h: 8  # Prozent: Preisanstieg zur vorherigen Stunde
   tibber_price_threshold_3h: 8  # Prozent: 3h Block Vergleich
@@ -186,13 +185,6 @@ schema:
   forecast_solar_api_key: str?
   forecast_solar_latitude: float?
   forecast_solar_longitude: float?
-  # v1.0.4 - PV Planes (individual fields, converted to array internally)
-  plane1_declination: int(0,90)?
-  plane1_azimuth: int(-180,180)?
-  plane1_kwp: float(0,100)?
-  plane2_declination: int(0,90)?
-  plane2_azimuth: int(-180,180)?
-  plane2_kwp: float(0,100)?
 
   input_datetime_planned_charge_end: str?
   input_datetime_planned_charge_start: str?
