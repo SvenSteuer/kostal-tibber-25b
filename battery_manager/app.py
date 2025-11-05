@@ -898,6 +898,11 @@ def api_battery_schedule():
         )
 
         if plan:
+            # Debug: Log first few SOC values being sent to frontend
+            soc_values = plan.get('hourly_soc', [])
+            if len(soc_values) >= 24:
+                logger.info(f"📊 API returning SOC values: hour 0={soc_values[0]:.1f}%, "
+                          f"hour 12={soc_values[12]:.1f}%, hour 23={soc_values[23]:.1f}%")
             return jsonify(plan)
         else:
             return jsonify({

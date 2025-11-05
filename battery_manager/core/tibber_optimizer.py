@@ -390,6 +390,7 @@ class TibberOptimizer:
             # CURRENT hour: Use actual current SOC!
             baseline_soc[current_hour] = current_soc
             soc_kwh = (current_soc / 100) * battery_capacity
+            logger.info(f"🔵 DEBUG baseline_soc: current_hour={current_hour}, setting baseline_soc[{current_hour}]={current_soc:.1f}%")
 
             # Simulate FUTURE hours (current_hour+1 to 47) from current SOC
             for hour in range(current_hour + 1, 48):
@@ -614,6 +615,7 @@ class TibberOptimizer:
             # CURRENT hour: Use actual current SOC!
             final_soc[current_hour] = current_soc
             soc_kwh = (current_soc / 100) * battery_capacity
+            logger.info(f"🟢 DEBUG final_soc: current_hour={current_hour}, setting final_soc[{current_hour}]={current_soc:.1f}%")
 
             # Simulate FUTURE hours (current_hour+1 to 47) with planned charging
             for hour in range(current_hour + 1, 48):
@@ -639,6 +641,15 @@ class TibberOptimizer:
             logger.info(f"48h plan complete: {len(charging_windows)} charge windows, "
                        f"total {plan['total_charging_kwh']:.2f} kWh, "
                        f"min SOC {plan['min_soc_reached']:.1f}%")
+
+            # Debug: Show SOC values around current hour
+            if current_hour > 0:
+                logger.info(f"🔍 SOC values: hour {current_hour-1}={final_soc[current_hour-1]:.1f}%, "
+                          f"hour {current_hour}={final_soc[current_hour]:.1f}%, "
+                          f"hour {current_hour+1 if current_hour < 47 else 'N/A'}={final_soc[current_hour+1]:.1f if current_hour < 47 else 0}%")
+            else:
+                logger.info(f"🔍 SOC values: hour {current_hour}={final_soc[current_hour]:.1f}%, "
+                          f"hour {current_hour+1}={final_soc[current_hour+1]:.1f}%")
 
             return plan
 
