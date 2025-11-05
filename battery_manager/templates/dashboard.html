@@ -185,17 +185,17 @@
         </div>
     </div>
 
-    <!-- Tibber Price Chart (v0.6.3) -->
+    <!-- Tibber Price Chart (v1.1.0 - 48h) -->
     <div class="card chart-card" style="grid-column: 1 / -1 !important;">
-        <h2>💰 Tibber Preisverlauf Heute</h2>
+        <h2>💰 Tibber Preisverlauf (Heute + Morgen)</h2>
         <div style="position: relative; height: 300px; padding: 1rem;">
             <canvas id="priceChart"></canvas>
         </div>
     </div>
 
-    <!-- Battery Schedule Chart (v0.9.0) -->
+    <!-- Battery Schedule Chart (v1.1.0 - 48h) -->
     <div class="card chart-card" style="grid-column: 1 / -1 !important;">
-        <h2>🔋 Batterie-Prognose & Ladeplanung</h2>
+        <h2>🔋 Batterie-Prognose & Ladeplanung (48h)</h2>
         <div style="position: relative; height: 350px; padding: 1rem;">
             <canvas id="batteryScheduleChart"></canvas>
         </div>
@@ -204,9 +204,9 @@
         </div>
     </div>
 
-    <!-- Consumption Forecast Chart (v0.6.3) -->
+    <!-- Consumption Forecast Chart (v1.1.0 - 48h) -->
     <div class="card chart-card" style="grid-column: 1 / -1 !important;">
-        <h2>📈 Prognostizierter Verbrauch Heute</h2>
+        <h2>📈 Prognostizierter Verbrauch (Heute + Morgen)</h2>
         <div style="position: relative; height: 300px; padding: 1rem;">
             <canvas id="consumptionChart"></canvas>
         </div>
@@ -849,13 +849,30 @@ function updatePriceChart() {
                 priceChart.data.labels = data.labels;
                 priceChart.data.datasets[0].data = data.prices;
 
-                // Highlight current hour with different color
+                // Highlight current hour with different color (only for today, index 0-23)
                 const currentHour = data.current_hour;
                 priceChart.data.datasets[0].backgroundColor = data.labels.map((label, index) => {
-                    return index === currentHour ? 'rgba(244, 67, 54, 0.8)' : 'rgba(255, 193, 7, 0.6)';
+                    // Current hour is only in today's range (0-23)
+                    if (index === currentHour && label.startsWith('Heute')) {
+                        return 'rgba(244, 67, 54, 0.8)';
+                    }
+                    // Tomorrow prices that are null (not available yet) - show in gray
+                    else if (data.prices[index] === null) {
+                        return 'rgba(128, 128, 128, 0.3)';
+                    }
+                    // Regular prices
+                    else {
+                        return 'rgba(255, 193, 7, 0.6)';
+                    }
                 });
                 priceChart.data.datasets[0].borderColor = data.labels.map((label, index) => {
-                    return index === currentHour ? 'rgb(244, 67, 54)' : 'rgb(255, 193, 7)';
+                    if (index === currentHour && label.startsWith('Heute')) {
+                        return 'rgb(244, 67, 54)';
+                    } else if (data.prices[index] === null) {
+                        return 'rgb(128, 128, 128)';
+                    } else {
+                        return 'rgb(255, 193, 7)';
+                    }
                 });
 
                 priceChart.update();
@@ -872,9 +889,9 @@ function updateConsumptionChart() {
         .then(data => {
             if (data.success && consumptionChart) {
                 consumptionChart.data.labels = data.labels;
-                // Update forecast data (yellow filled line)
+                // Update forecast data (yellow filled line) - 48 hours
                 consumptionChart.data.datasets[0].data = data.forecast;
-                // Update actual data (blue line)
+                // Update actual data (blue line) - 48 hours
                 consumptionChart.data.datasets[1].data = data.actual;
 
                 consumptionChart.update();
@@ -917,15 +934,21 @@ function updateBatteryScheduleChart() {
         .then(response => response.json())
         .then(data => {
             if (batteryScheduleChart) {
-                // Create labels (0:00 to 23:00)
-                const labels = Array.from({length: 24}, (_, i) => `${i}:00`);
+                // Create labels for 48 hours (today 0-23 + tomorrow 0-23)
+                const labels = [];
+                for (let i = 0; i < 24; i++) {
+                    labels.push(`Heute ${i}:00`);
+                }
+                for (let i = 0; i < 24; i++) {
+                    labels.push(`Morgen ${i}:00`);
+                }
                 batteryScheduleChart.data.labels = labels;
 
-                // Update SOC prognosis (green line)
-                batteryScheduleChart.data.datasets[0].data = data.hourly_soc || Array(24).fill(0);
+                // Update SOC prognosis (green line) - 48 hours
+                batteryScheduleChart.data.datasets[0].data = data.hourly_soc || Array(48).fill(0);
 
-                // Update planned charging (red bars)
-                batteryScheduleChart.data.datasets[1].data = data.hourly_charging || Array(24).fill(0);
+                // Update planned charging (red bars) - 48 hours
+                batteryScheduleChart.data.datasets[1].data = data.hourly_charging || Array(48).fill(0);
 
                 batteryScheduleChart.update();
 
