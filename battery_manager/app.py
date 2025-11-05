@@ -69,6 +69,7 @@ def normalize_planes_config(config):
     Supports BOTH formats for maximum compatibility:
     1. Array format (new/standard): forecast_solar_planes: [{...}, {...}]
     2. Individual fields (legacy): plane1_declination, plane1_azimuth, etc.
+    3. Auto-creates defaults if Forecast.Solar API is enabled but no planes exist
 
     This ensures existing installations continue working while allowing
     the array format to persist without being deleted by HA.
@@ -98,7 +99,13 @@ def normalize_planes_config(config):
         config['forecast_solar_planes'] = planes
         logger.info(f"✓ Built forecast_solar_planes array from individual fields: {len(planes)} plane(s)")
     elif config.get('enable_forecast_solar_api', False):
-        logger.warning("Forecast.Solar API enabled but no planes configured")
+        # No planes configured, but API is enabled → use defaults from config.yaml
+        default_planes = [
+            {'declination': 22, 'azimuth': 45, 'kwp': 8.96},
+            {'declination': 22, 'azimuth': -135, 'kwp': 10.665}
+        ]
+        config['forecast_solar_planes'] = default_planes
+        logger.info(f"✓ Using default forecast_solar_planes (no config found): {len(default_planes)} plane(s)")
 
     return config
 
@@ -111,7 +118,18 @@ def load_config():
                 logger.info(f"Configuration loaded from {CONFIG_PATH}")
 
                 # v1.0.5 - Normalize planes configuration (backward-compatible)
+                old_planes = config.get('forecast_solar_planes')
                 config = normalize_planes_config(config)
+                new_planes = config.get('forecast_solar_planes')
+
+                # If defaults were added, save them to options.json
+                if old_planes != new_planes and new_planes is not None:
+                    try:
+                        with open(CONFIG_PATH, 'w') as f_write:
+                            json.dump(config, f_write, indent=2)
+                        logger.info(f"✓ Saved default planes to {CONFIG_PATH}")
+                    except Exception as e:
+                        logger.warning(f"Could not save default planes: {e}")
 
                 return config
         else:
