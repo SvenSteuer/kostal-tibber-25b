@@ -643,13 +643,16 @@ class TibberOptimizer:
                        f"min SOC {plan['min_soc_reached']:.1f}%")
 
             # Debug: Show SOC values around current hour
-            if current_hour > 0:
+            if current_hour > 0 and current_hour < 47:
                 logger.info(f"🔍 SOC values: hour {current_hour-1}={final_soc[current_hour-1]:.1f}%, "
                           f"hour {current_hour}={final_soc[current_hour]:.1f}%, "
-                          f"hour {current_hour+1 if current_hour < 47 else 'N/A'}={final_soc[current_hour+1]:.1f if current_hour < 47 else 0}%")
-            else:
+                          f"hour {current_hour+1}={final_soc[current_hour+1]:.1f}%")
+            elif current_hour == 0:
                 logger.info(f"🔍 SOC values: hour {current_hour}={final_soc[current_hour]:.1f}%, "
                           f"hour {current_hour+1}={final_soc[current_hour+1]:.1f}%")
+            else:  # current_hour == 47
+                logger.info(f"🔍 SOC values: hour {current_hour-1}={final_soc[current_hour-1]:.1f}%, "
+                          f"hour {current_hour}={final_soc[current_hour]:.1f}%")
 
             return plan
 
