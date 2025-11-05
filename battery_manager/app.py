@@ -62,62 +62,6 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 # Configuration
 CONFIG_PATH = os.getenv('CONFIG_PATH', '/data/options.json')
 
-def convert_planes_to_array(config):
-    """
-    v1.0.4 - Convert individual plane fields to forecast_solar_planes array
-
-    Home Assistant schema doesn't support nested array structures, so we store
-    planes as individual fields (plane1_declination, plane1_azimuth, etc.)
-    and convert them to an array for internal use.
-    """
-    planes = []
-
-    # Try to build planes from individual fields (up to 2 planes supported)
-    for i in range(1, 3):  # plane1, plane2
-        declination = config.get(f'plane{i}_declination')
-        azimuth = config.get(f'plane{i}_azimuth')
-        kwp = config.get(f'plane{i}_kwp')
-
-        # Only add plane if all three values are present
-        if declination is not None and azimuth is not None and kwp is not None:
-            planes.append({
-                'declination': int(declination),
-                'azimuth': int(azimuth),
-                'kwp': float(kwp)
-            })
-
-    if planes:
-        config['forecast_solar_planes'] = planes
-        logger.info(f"✓ Built forecast_solar_planes array from individual fields: {len(planes)} plane(s)")
-    else:
-        # Fallback: check if old array format exists
-        if 'forecast_solar_planes' not in config:
-            logger.warning("WARNING - Forecast.Solar API enabled but no planes configured")
-
-    return config
-
-def convert_planes_to_fields(config):
-    """
-    v1.0.4 - Convert forecast_solar_planes array to individual fields
-
-    When saving configuration from Web GUI (which sends array format),
-    convert back to individual fields for Home Assistant validation.
-    """
-    planes = config.get('forecast_solar_planes', [])
-
-    if planes and isinstance(planes, list):
-        for i, plane in enumerate(planes[:2], start=1):  # Max 2 planes
-            config[f'plane{i}_declination'] = int(plane.get('declination', 0))
-            config[f'plane{i}_azimuth'] = int(plane.get('azimuth', 0))
-            config[f'plane{i}_kwp'] = float(plane.get('kwp', 0))
-
-        # Remove array format before saving (HA can't validate it)
-        del config['forecast_solar_planes']
-
-        logger.info(f"✓ Converted forecast_solar_planes array to individual fields: {len(planes)} plane(s)")
-
-    return config
-
 def load_config():
     """Load configuration from Home Assistant options"""
     try:
@@ -125,16 +69,12 @@ def load_config():
             with open(CONFIG_PATH, 'r') as f:
                 config = json.load(f)
                 logger.info(f"Configuration loaded from {CONFIG_PATH}")
-
-                # v1.0.4 - Convert individual plane fields to array
-                config = convert_planes_to_array(config)
-
                 return config
         else:
             logger.warning(f"Config file not found: {CONFIG_PATH}, using defaults")
     except Exception as e:
         logger.error(f"Error loading config: {e}")
-
+    
     # Default configuration
     return {
         'inverter_ip': '192.168.80.76',
@@ -174,14 +114,7 @@ def load_config():
         'tibber_price_threshold_3h': 8,
         'charge_duration_per_10_percent': 18,
         'input_datetime_planned_charge_end': 'input_datetime.tibber_geplantes_ladeende',
-        'input_datetime_planned_charge_start': 'input_datetime.tibber_geplanter_ladebeginn',
-        # v1.0.4 - Forecast.Solar planes (individual fields)
-        'plane1_declination': 22,
-        'plane1_azimuth': 45,
-        'plane1_kwp': 8.96,
-        'plane2_declination': 22,
-        'plane2_azimuth': -135,
-        'plane2_kwp': 10.665
+        'input_datetime_planned_charge_start': 'input_datetime.tibber_geplanter_ladebeginn'
     }
 
 # Load configuration
@@ -326,7 +259,6 @@ try:
             api_key = config.get('forecast_solar_api_key')
             latitude = config.get('forecast_solar_latitude')
             longitude = config.get('forecast_solar_longitude')
-            planes = config.get('forecast_solar_planes', [])
 
             if api_key and latitude is not None and longitude is not None:
                 forecast_solar_api = ForecastSolarAPI(api_key, latitude, longitude)
@@ -335,12 +267,7 @@ try:
                 if tibber_optimizer:
                     tibber_optimizer.set_forecast_solar_api(forecast_solar_api)
 
-                # v1.0.4 - Check if planes are configured
-                if planes:
-                    add_log('INFO', f'Forecast.Solar Professional API enabled (lat={latitude}, lon={longitude}, {len(planes)} planes)')
-                else:
-                    logger.warning("Forecast.Solar API enabled but no planes configured")
-                    add_log('WARNING', 'Forecast.Solar API enabled but no planes configured')
+                add_log('INFO', f'Forecast.Solar Professional API enabled (lat={latitude}, lon={longitude})')
             else:
                 logger.warning("Forecast.Solar API enabled but missing configuration (api_key, latitude, longitude)")
                 add_log('WARNING', 'Forecast.Solar API: Missing configuration parameters')
@@ -692,24 +619,18 @@ def api_status():
 def api_config():
     """Get or update configuration"""
     global config
-
+    
     if request.method == 'POST':
         try:
             new_config = request.json
-
-            # v1.0.4 - Convert forecast_solar_planes array to individual fields before saving
-            new_config = convert_planes_to_fields(new_config)
-
+            
             # Update configuration
             config.update(new_config)
-
+            
             # Save to file
             with open(CONFIG_PATH, 'w') as f:
                 json.dump(config, f, indent=2)
-
-            # Reload config to rebuild array format for internal use
-            config = load_config()
-
+            
             add_log('INFO', 'Configuration updated and saved')
             return jsonify({
                 'status': 'ok',
@@ -721,7 +642,7 @@ def api_config():
                 'status': 'error',
                 'message': str(e)
             }), 500
-
+    
     return jsonify(config)
 
 @app.route('/api/control', methods=['POST'])
