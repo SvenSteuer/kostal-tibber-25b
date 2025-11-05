@@ -872,20 +872,24 @@ def api_charging_status():
 
 @app.route('/api/battery_schedule')
 def api_battery_schedule():
-    """Get daily battery schedule with SOC forecast and charging plan (v0.9.0)"""
+    """Get 48-hour battery schedule with SOC forecast and charging plan (v1.1.0 - extended to 2 days)"""
     try:
         # Get current SOC
         current_soc = app_state['battery']['soc']
 
-        # Get Tibber prices
+        # Get Tibber prices for today + tomorrow
         prices = []
         if ha_client:
             tibber_sensor = config.get('tibber_price_sensor', 'sensor.tibber_prices')
             attrs = ha_client.get_attributes(tibber_sensor)
-            if attrs and 'today' in attrs:
-                prices = attrs['today']
+            if attrs:
+                # Combine today and tomorrow prices
+                today_prices = attrs.get('today', [])
+                tomorrow_prices = attrs.get('tomorrow', [])
+                prices = today_prices + tomorrow_prices
+                logger.info(f"Loaded {len(today_prices)} today prices + {len(tomorrow_prices)} tomorrow prices = {len(prices)} total")
 
-        # Generate plan
+        # Generate 48-hour plan
         plan = tibber_optimizer.plan_daily_battery_schedule(
             ha_client=ha_client,
             config=config,
@@ -898,11 +902,11 @@ def api_battery_schedule():
         else:
             return jsonify({
                 'error': 'Could not generate battery schedule',
-                'hourly_soc': [current_soc] * 24,
-                'hourly_charging': [0] * 24,
-                'hourly_pv': [0] * 24,
-                'hourly_consumption': [0] * 24,
-                'hourly_prices': [0] * 24,
+                'hourly_soc': [current_soc] * 48,
+                'hourly_charging': [0] * 48,
+                'hourly_pv': [0] * 48,
+                'hourly_consumption': [0] * 48,
+                'hourly_prices': [0] * 48,
                 'charging_windows': [],
                 'last_planned': None
             }), 500
@@ -911,11 +915,11 @@ def api_battery_schedule():
         logger.error(f"Error getting battery schedule: {e}", exc_info=True)
         return jsonify({
             'error': str(e),
-            'hourly_soc': [0] * 24,
-            'hourly_charging': [0] * 24,
-            'hourly_pv': [0] * 24,
-            'hourly_consumption': [0] * 24,
-            'hourly_prices': [0] * 24,
+            'hourly_soc': [0] * 48,
+            'hourly_charging': [0] * 48,
+            'hourly_pv': [0] * 48,
+            'hourly_consumption': [0] * 48,
+            'hourly_prices': [0] * 48,
             'charging_windows': [],
             'last_planned': None
         }), 500
@@ -966,7 +970,7 @@ def api_adjust_power():
 
 @app.route('/api/tibber_price_chart')
 def api_tibber_price_chart():
-    """Get Tibber price data for today (v0.6.3) for chart display"""
+    """Get Tibber price data for 48 hours (v1.1.0 - today + tomorrow) for chart display"""
     try:
         if not ha_client:
             return jsonify({
@@ -984,6 +988,7 @@ def api_tibber_price_chart():
             }), 500
 
         today_prices = prices_data['attributes'].get('today', [])
+        tomorrow_prices = prices_data['attributes'].get('tomorrow', [])
 
         if not today_prices:
             return jsonify({
@@ -992,29 +997,52 @@ def api_tibber_price_chart():
             }), 500
 
         # Format for chart: labels (hours) and data (prices in Cent)
+        # 48 hours: today (0-23) + tomorrow (24-47)
+        from datetime import datetime
+        now = datetime.now().astimezone()
+        current_hour = now.hour
+
         hours = []
         prices = []
 
+        # Process today's prices (hours 0-23)
         for entry in today_prices:
-            # Parse hour from timestamp
             start_time = entry.get('startsAt', '')
             if start_time:
                 try:
-                    from datetime import datetime
                     dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                    # Convert to local timezone
                     local_dt = dt.astimezone()
-                    hours.append(f"{local_dt.hour:02d}:00")
-                    # Convert EUR to Cent
+                    hours.append(f"Heute {local_dt.hour:02d}:00")
                     prices.append(round(entry.get('total', 0) * 100, 2))
                 except:
                     continue
+
+        # Process tomorrow's prices (hours 24-47)
+        # Note: Tomorrow prices might not be available until ~13:00 today
+        if tomorrow_prices:
+            for entry in tomorrow_prices:
+                start_time = entry.get('startsAt', '')
+                if start_time:
+                    try:
+                        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                        local_dt = dt.astimezone()
+                        hours.append(f"Morgen {local_dt.hour:02d}:00")
+                        prices.append(round(entry.get('total', 0) * 100, 2))
+                    except:
+                        continue
+        else:
+            # Tomorrow prices not yet available - fill with nulls for 24 hours
+            logger.info("Tomorrow prices not yet available (before 13:00), filling with nulls")
+            for hour in range(24):
+                hours.append(f"Morgen {hour:02d}:00")
+                prices.append(None)
 
         return jsonify({
             'success': True,
             'labels': hours,
             'prices': prices,
-            'current_hour': datetime.now().astimezone().hour
+            'current_hour': current_hour,
+            'tomorrow_available': len(tomorrow_prices) > 0
         })
 
     except Exception as e:
@@ -1026,7 +1054,7 @@ def api_tibber_price_chart():
 
 @app.route('/api/consumption_forecast_chart')
 def api_consumption_forecast_chart():
-    """Get consumption forecast for today (v0.6.3) based on learned data"""
+    """Get consumption forecast for 48 hours (v1.1.0 - today + tomorrow) based on learned data"""
     try:
         if not consumption_learner:
             return jsonify({
@@ -1034,12 +1062,15 @@ def api_consumption_forecast_chart():
                 'error': 'Consumption learner not available'
             }), 500
 
-        # Get hourly profile (forecast) for today's weekday
-        from datetime import datetime
+        # Get hourly profile (forecast) for today and tomorrow's weekday
+        from datetime import datetime, timedelta
         today = datetime.now().date()
-        profile = consumption_learner.get_hourly_profile(target_date=today)
+        tomorrow = today + timedelta(days=1)
 
-        if not profile:
+        profile_today = consumption_learner.get_hourly_profile(target_date=today)
+        profile_tomorrow = consumption_learner.get_hourly_profile(target_date=tomorrow)
+
+        if not profile_today:
             return jsonify({
                 'success': False,
                 'error': 'No consumption data available'
@@ -1092,41 +1123,52 @@ def api_consumption_forecast_chart():
                         # Blend actual data with forecast for smoother display
                         elapsed_fraction = current_minute / 60.0
                         remaining_fraction = (60 - current_minute) / 60.0
-                        forecast_value = profile.get(current_hour, avg)
+                        forecast_value = profile_today.get(current_hour, avg)
 
                         current_hour_live_value = (avg * elapsed_fraction) + (forecast_value * remaining_fraction)
             except Exception as e:
                 logger.error(f"Error calculating current hour consumption: {e}")
 
-        # Build actual consumption array
-        for hour in range(24):
-            if hour < current_hour:
-                # Past hours: use DB value if available
-                if hour in today_db_consumption:
-                    actual_consumption.append(round(today_db_consumption[hour], 2))
+        # Build actual consumption array for 48 hours (today + tomorrow)
+        for hour in range(48):
+            if hour < 24:
+                # TODAY (hours 0-23)
+                if hour < current_hour:
+                    # Past hours: use DB value if available
+                    if hour in today_db_consumption:
+                        actual_consumption.append(round(today_db_consumption[hour], 2))
+                    else:
+                        actual_consumption.append(None)
+                elif hour == current_hour:
+                    # Current hour: use live blended value or DB value
+                    if current_hour_live_value is not None:
+                        actual_consumption.append(round(current_hour_live_value, 2))
+                    elif hour in today_db_consumption:
+                        actual_consumption.append(round(today_db_consumption[hour], 2))
+                    else:
+                        actual_consumption.append(None)
                 else:
-                    actual_consumption.append(None)
-            elif hour == current_hour:
-                # Current hour: use live blended value or DB value
-                if current_hour_live_value is not None:
-                    actual_consumption.append(round(current_hour_live_value, 2))
-                elif hour in today_db_consumption:
-                    actual_consumption.append(round(today_db_consumption[hour], 2))
-                else:
+                    # Future hours today: no actual data
                     actual_consumption.append(None)
             else:
-                # Future hours: no actual data
+                # TOMORROW (hours 24-47): no actual data yet
                 actual_consumption.append(None)
 
-        # Format for chart: labels (hours) and data (consumption in kW)
+        # Format for chart: labels (hours) and data (consumption in kW) for 48 hours
         hours = []
         forecast_consumption = []
 
+        # Today's data (hours 0-23)
         for hour in range(24):
-            hours.append(f"{hour:02d}:00")
-            forecast_consumption.append(round(profile.get(hour, 0), 2))
+            hours.append(f"Heute {hour:02d}:00")
+            forecast_consumption.append(round(profile_today.get(hour, 0), 2))
 
-        # Calculate forecast accuracy for completed hours
+        # Tomorrow's data (hours 24-47)
+        for hour in range(24):
+            hours.append(f"Morgen {hour:02d}:00")
+            forecast_consumption.append(round(profile_tomorrow.get(hour, 0), 2))
+
+        # Calculate forecast accuracy for TODAY's completed hours only
         accuracy = None
         accuracy_hours = 0
 
@@ -1135,7 +1177,7 @@ def api_consumption_forecast_chart():
             now = datetime.now()
             current_hour = now.hour
 
-            for hour in range(current_hour):  # Only completed hours
+            for hour in range(current_hour):  # Only completed hours TODAY
                 actual = actual_consumption[hour] if hour < len(actual_consumption) else None
                 forecast = forecast_consumption[hour] if hour < len(forecast_consumption) else None
 
@@ -1788,14 +1830,16 @@ def controller_loop():
                             config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
                         ) or 50)  # Fallback to 50% if not available
 
-                        # Get Tibber prices
+                        # Get Tibber prices for today + tomorrow
                         prices = []
                         tibber_sensor = config.get('tibber_price_sensor', 'sensor.tibber_prices')
                         attrs = ha_client.get_attributes(tibber_sensor)
-                        if attrs and 'today' in attrs:
-                            prices = attrs['today']
+                        if attrs:
+                            today_prices = attrs.get('today', [])
+                            tomorrow_prices = attrs.get('tomorrow', [])
+                            prices = today_prices + tomorrow_prices
 
-                        # Generate full-day schedule
+                        # Generate 48-hour schedule
                         schedule = tibber_optimizer.plan_daily_battery_schedule(
                             ha_client=ha_client,
                             config=config,

@@ -31,7 +31,7 @@ class TibberOptimizer:
         self.forecast_solar_api = api
         logger.info("Forecast.Solar API integrated into optimizer")
 
-    def get_hourly_pv_forecast(self, ha_client, config) -> Dict[int, float]:
+    def get_hourly_pv_forecast(self, ha_client, config, include_tomorrow=False) -> Dict[int, float]:
         """
         Get hourly PV forecast (v0.9.2: now supports Forecast.Solar API)
 
@@ -42,9 +42,12 @@ class TibberOptimizer:
         Args:
             ha_client: Home Assistant client instance
             config: Configuration dict with sensor names
+            include_tomorrow: If True, returns 48h forecast (today 0-23 + tomorrow 24-47)
 
         Returns:
-            dict: {hour: kwh_forecast} for each hour of the day
+            dict: {hour: kwh_forecast} for each hour
+                  If include_tomorrow=False: hour 0-23 (today only)
+                  If include_tomorrow=True: hour 0-47 (today=0-23, tomorrow=24-47)
         """
         # v0.9.2 - Try Forecast.Solar API first if enabled
         if (self.forecast_solar_api and
@@ -66,32 +69,41 @@ class TibberOptimizer:
                 logger.warning("Forecast.Solar API enabled but no planes configured")
 
         # Fallback: Use Home Assistant sensors (original v0.8.1 method)
-        logger.debug("Using Home Assistant sensors for PV forecast")
+        logger.debug(f"Using Home Assistant sensors for PV forecast (include_tomorrow={include_tomorrow})")
         hourly_forecast = {}
 
         # Get sensor names from config
-        roof1_sensor = config.get('pv_production_today_roof1')
-        roof2_sensor = config.get('pv_production_today_roof2')
+        roof1_today_sensor = config.get('pv_production_today_roof1')
+        roof2_today_sensor = config.get('pv_production_today_roof2')
+        roof1_tomorrow_sensor = config.get('pv_production_tomorrow_roof1') if include_tomorrow else None
+        roof2_tomorrow_sensor = config.get('pv_production_tomorrow_roof2') if include_tomorrow else None
 
-        logger.debug(f"PV forecast sensors: roof1='{roof1_sensor}', roof2='{roof2_sensor}'")
+        logger.debug(f"PV forecast sensors: roof1_today='{roof1_today_sensor}', roof2_today='{roof2_today_sensor}'")
+        if include_tomorrow:
+            logger.debug(f"Tomorrow sensors: roof1_tomorrow='{roof1_tomorrow_sensor}', roof2_tomorrow='{roof2_tomorrow_sensor}'")
 
-        if not roof1_sensor and not roof2_sensor:
+        if not roof1_today_sensor and not roof2_today_sensor:
             logger.warning("No PV forecast sensors configured")
             return {}
 
         try:
-            # Get today's date for filtering
-            today = datetime.now().astimezone().date()
+            # Get today's and tomorrow's date for filtering
+            now = datetime.now().astimezone()
+            today = now.date()
+            tomorrow = today + timedelta(days=1)
 
-            # Process roof 1
-            if roof1_sensor:
-                logger.debug(f"Fetching attributes from {roof1_sensor}")
-                attrs = ha_client.get_attributes(roof1_sensor)
+            # Process TODAY's sensors
+            for roof_sensor in [roof1_today_sensor, roof2_today_sensor]:
+                if not roof_sensor:
+                    continue
+
+                logger.debug(f"Fetching today attributes from {roof_sensor}")
+                attrs = ha_client.get_attributes(roof_sensor)
                 if attrs:
-                    logger.debug(f"Roof1 attributes keys: {list(attrs.keys())}")
+                    logger.debug(f"Today {roof_sensor} attributes keys: {list(attrs.keys())}")
                     if 'wh_hours' in attrs:
                         wh_hours = attrs['wh_hours']
-                        logger.debug(f"Roof1 wh_hours has {len(wh_hours)} entries")
+                        logger.debug(f"Today {roof_sensor} wh_hours has {len(wh_hours)} entries")
 
                         for timestamp_str, wh_value in wh_hours.items():
                             try:
@@ -102,7 +114,7 @@ class TibberOptimizer:
                                 if dt.date() != today:
                                     continue
 
-                                hour = dt.hour
+                                hour = dt.hour  # 0-23 for today
                                 kwh = float(wh_value) / 1000.0  # Wh to kWh
 
                                 # Add to hourly forecast
@@ -112,42 +124,46 @@ class TibberOptimizer:
                                 logger.warning(f"Error parsing wh_hours entry {timestamp_str}: {e}")
                                 continue
                     else:
-                        logger.warning(f"Roof1 sensor {roof1_sensor} has no 'wh_hours' attribute")
+                        logger.warning(f"Sensor {roof_sensor} has no 'wh_hours' attribute")
                 else:
-                    logger.warning(f"Could not get attributes for roof1 sensor {roof1_sensor}")
+                    logger.warning(f"Could not get attributes for sensor {roof_sensor}")
 
-            # Process roof 2
-            if roof2_sensor:
-                logger.debug(f"Fetching attributes from {roof2_sensor}")
-                attrs = ha_client.get_attributes(roof2_sensor)
-                if attrs:
-                    logger.debug(f"Roof2 attributes keys: {list(attrs.keys())}")
-                    if 'wh_hours' in attrs:
-                        wh_hours = attrs['wh_hours']
-                        logger.debug(f"Roof2 wh_hours has {len(wh_hours)} entries")
+            # Process TOMORROW's sensors (if requested)
+            if include_tomorrow:
+                for roof_sensor in [roof1_tomorrow_sensor, roof2_tomorrow_sensor]:
+                    if not roof_sensor:
+                        continue
 
-                        for timestamp_str, wh_value in wh_hours.items():
-                            try:
-                                # Parse timestamp
-                                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    logger.debug(f"Fetching tomorrow attributes from {roof_sensor}")
+                    attrs = ha_client.get_attributes(roof_sensor)
+                    if attrs:
+                        logger.debug(f"Tomorrow {roof_sensor} attributes keys: {list(attrs.keys())}")
+                        if 'wh_hours' in attrs:
+                            wh_hours = attrs['wh_hours']
+                            logger.debug(f"Tomorrow {roof_sensor} wh_hours has {len(wh_hours)} entries")
 
-                                # Only process today's data
-                                if dt.date() != today:
+                            for timestamp_str, wh_value in wh_hours.items():
+                                try:
+                                    # Parse timestamp
+                                    dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+
+                                    # Only process tomorrow's data
+                                    if dt.date() != tomorrow:
+                                        continue
+
+                                    hour = dt.hour + 24  # Offset by 24 hours: 24-47 for tomorrow
+                                    kwh = float(wh_value) / 1000.0  # Wh to kWh
+
+                                    # Add to hourly forecast
+                                    hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + kwh
+
+                                except (ValueError, TypeError) as e:
+                                    logger.warning(f"Error parsing wh_hours entry {timestamp_str}: {e}")
                                     continue
-
-                                hour = dt.hour
-                                kwh = float(wh_value) / 1000.0  # Wh to kWh
-
-                                # Add to hourly forecast
-                                hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + kwh
-
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"Error parsing wh_hours entry {timestamp_str}: {e}")
-                                continue
+                        else:
+                            logger.warning(f"Tomorrow sensor {roof_sensor} has no 'wh_hours' attribute")
                     else:
-                        logger.warning(f"Roof2 sensor {roof2_sensor} has no 'wh_hours' attribute")
-                else:
-                    logger.warning(f"Could not get attributes for roof2 sensor {roof2_sensor}")
+                        logger.warning(f"Could not get attributes for tomorrow sensor {roof_sensor}")
 
             if hourly_forecast:
                 logger.info(f"Retrieved hourly PV forecast for {len(hourly_forecast)} hours")
@@ -261,20 +277,20 @@ class TibberOptimizer:
                                     current_soc: float,
                                     prices: List[Dict]) -> Dict:
         """
-        Plans full-day battery schedule using predictive optimization (v0.9.0)
+        Plans 48-hour battery schedule using predictive optimization (v1.1.0 - extended to 2 days)
 
-        Simulates entire day hour-by-hour with consumption, PV, and prices.
+        Simulates 48 hours (today + tomorrow) hour-by-hour with consumption, PV, and prices.
         Identifies deficits and schedules charging at cheapest times BEFORE deficits.
 
         Args:
             ha_client: Home Assistant client for sensor data
             config: Configuration dict
             current_soc: Current battery SOC (%)
-            prices: List of Tibber price data with datetime and total price
+            prices: List of Tibber price data with datetime and total price (today + tomorrow)
 
         Returns:
             dict: {
-                'hourly_soc': [float],  # Projected SOC for each hour (0-23)
+                'hourly_soc': [float],  # Projected SOC for each hour (0-47: today=0-23, tomorrow=24-47)
                 'hourly_charging': [float],  # Planned grid charging kWh per hour
                 'hourly_pv': [float],  # PV production per hour
                 'hourly_consumption': [float],  # Consumption per hour
@@ -297,22 +313,32 @@ class TibberOptimizer:
             max_soc = config.get('auto_charge_below_soc', 95)  # %
             max_charge_power = config.get('max_charge_power', 3900) / 1000  # kW
 
-            # 1. Collect hourly data for full day
+            # 1. Collect hourly data for 48 hours (today + tomorrow)
+            tomorrow = today + timedelta(days=1)
             hourly_consumption = []
             hourly_pv = []
             hourly_prices = []
 
-            # Get PV forecast
-            pv_forecast = self.get_hourly_pv_forecast(ha_client, config)
+            # Get PV forecast for 48 hours (today + tomorrow)
+            pv_forecast = self.get_hourly_pv_forecast(ha_client, config, include_tomorrow=True)
 
-            # Build hourly data arrays
-            for hour in range(24):
+            # Build hourly data arrays for 48 hours
+            for hour in range(48):
+                # Determine actual date and hour for this iteration
+                if hour < 24:
+                    # Today (hours 0-23)
+                    actual_date = today
+                    actual_hour = hour
+                else:
+                    # Tomorrow (hours 24-47)
+                    actual_date = tomorrow
+                    actual_hour = hour - 24
+
                 # Consumption forecast (weekday-aware)
-                hour_date = today if hour >= current_hour else today + timedelta(days=1)
-                consumption = self.consumption_learner.get_average_consumption(hour, target_date=hour_date)
+                consumption = self.consumption_learner.get_average_consumption(actual_hour, target_date=actual_date)
                 hourly_consumption.append(consumption)
 
-                # PV forecast
+                # PV forecast (already has correct indexing: 0-23=today, 24-47=tomorrow)
                 pv = pv_forecast.get(hour, 0.0)
                 hourly_pv.append(pv)
 
@@ -325,22 +351,22 @@ class TibberOptimizer:
                         try:
                             price_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                             price_dt = price_dt.astimezone()  # Convert to local timezone
-                            if price_dt.hour == hour and price_dt.date() == today:
+                            if price_dt.hour == actual_hour and price_dt.date() == actual_date:
                                 price = p.get('total', 0.30)
                                 break
                         except Exception:
                             continue
                 hourly_prices.append(price)
 
-            logger.info(f"Planning battery schedule for {today}")
-            logger.debug(f"Hourly consumption: {[f'{c:.2f}' for c in hourly_consumption]}")
-            logger.debug(f"Hourly PV: {[f'{p:.2f}' for p in hourly_pv]}")
+            logger.info(f"Planning 48h battery schedule for {today} and {tomorrow}")
+            logger.debug(f"Hourly consumption (48h): {[f'{c:.2f}' for c in hourly_consumption]}")
+            logger.debug(f"Hourly PV (48h): {[f'{p:.2f}' for p in hourly_pv]}")
 
-            # 2. Simulate SOC without any grid charging (baseline)
-            baseline_soc = [0.0] * 24
+            # 2. Simulate SOC without any grid charging (baseline) - 48 hours
+            baseline_soc = [0.0] * 48
             soc_kwh = (current_soc / 100) * battery_capacity
 
-            for hour in range(24):
+            for hour in range(48):
                 if hour < current_hour:
                     baseline_soc[hour] = current_soc  # Past hours: use current
                 else:
@@ -355,9 +381,9 @@ class TibberOptimizer:
 
                     baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-            # 3. Identify deficit hours (where SOC falls below minimum)
+            # 3. Identify deficit hours (where SOC falls below minimum) - 48 hours
             deficit_hours = []
-            for hour in range(current_hour, 24):
+            for hour in range(current_hour, 48):
                 if baseline_soc[hour] <= min_soc + 5:  # 5% buffer
                     # Calculate how much energy is missing
                     current_kwh = (baseline_soc[hour] / 100) * battery_capacity
@@ -372,9 +398,9 @@ class TibberOptimizer:
 
             logger.info(f"Found {len(deficit_hours)} deficit hours: {[d['hour'] for d in deficit_hours]}")
 
-            # 4. Plan charging windows (cheapest hours BEFORE deficits)
+            # 4. Plan charging windows (cheapest hours BEFORE deficits) - 48 hours
             charging_windows = []
-            hourly_charging = [0.0] * 24
+            hourly_charging = [0.0] * 48
 
             for deficit in deficit_hours:
                 deficit_hour = deficit['hour']
@@ -418,12 +444,12 @@ class TibberOptimizer:
 
             logger.info(f"Planned {len(charging_windows)} deficit-based charging windows")
 
-            # 4b. ECONOMIC OPTIMIZATION: Opportunistic charging at cheap prices (v1.0.9)
+            # 4b. ECONOMIC OPTIMIZATION: Opportunistic charging at cheap prices (v1.0.9) - 48 hours
             # Only charge if economically beneficial AND battery won't be filled by PV anyway
             economic_threshold = 1.10  # Minimum 10% cost saving required
             negative_price_threshold = 0.0  # Charge if price <= 0 (we get paid!)
 
-            for hour in range(current_hour, 24):
+            for hour in range(current_hour, 48):
                 # Skip if already charging in this hour
                 if hourly_charging[hour] > 0:
                     continue
@@ -462,7 +488,7 @@ class TibberOptimizer:
 
                 # Find future expensive hours where this stored energy would be used
                 future_expensive_hours = []
-                for future_h in range(hour + 1, 24):
+                for future_h in range(hour + 1, 48):
                     if hourly_prices[future_h] > hourly_prices[hour] * economic_threshold:
                         future_expensive_hours.append(future_h)
 
@@ -482,17 +508,17 @@ class TibberOptimizer:
 
                     # Step 1: Find target hour (when to stop charging for)
                     # Either: PV becomes sufficient, cheaper hour arrives, or expensive hours begin
-                    target_hour = 24
+                    target_hour = 48
 
                     # Check if a cheaper hour is coming
-                    for future_h in range(hour + 1, 24):
+                    for future_h in range(hour + 1, 48):
                         if hourly_prices[future_h] < cost_per_kwh * 0.98:  # 2% cheaper
                             target_hour = future_h
                             logger.debug(f"Found cheaper hour at {future_h}:00, stopping calculation there")
                             break
 
                     # Check when PV becomes sufficient (covers 80%+ of consumption)
-                    for future_h in range(hour + 1, min(target_hour, 24)):
+                    for future_h in range(hour + 1, min(target_hour, 48)):
                         if hourly_pv[future_h] >= hourly_consumption[future_h] * 0.8:
                             target_hour = future_h
                             logger.debug(f"PV becomes sufficient at {future_h}:00, stopping calculation there")
@@ -550,11 +576,11 @@ class TibberOptimizer:
                        f"({len([w for w in charging_windows if 'deficit' in w['reason'].lower()])} deficit, "
                        f"{len([w for w in charging_windows if 'Economic' in w['reason']])} economic)")
 
-            # 5. Re-simulate SOC with planned charging
-            final_soc = [0.0] * 24
+            # 5. Re-simulate SOC with planned charging - 48 hours
+            final_soc = [0.0] * 48
             soc_kwh = (current_soc / 100) * battery_capacity
 
-            for hour in range(24):
+            for hour in range(48):
                 if hour < current_hour:
                     final_soc[hour] = current_soc
                 else:
@@ -570,7 +596,7 @@ class TibberOptimizer:
 
                     final_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-            # 6. Return comprehensive plan
+            # 6. Return comprehensive 48-hour plan
             plan = {
                 'hourly_soc': final_soc,
                 'hourly_charging': hourly_charging,
@@ -580,10 +606,10 @@ class TibberOptimizer:
                 'charging_windows': charging_windows,
                 'last_planned': now.isoformat(),
                 'total_charging_kwh': sum(hourly_charging),
-                'min_soc_reached': min(final_soc[current_hour:]) if current_hour < 24 else current_soc
+                'min_soc_reached': min(final_soc[current_hour:]) if current_hour < 48 else current_soc
             }
 
-            logger.info(f"Daily plan complete: {len(charging_windows)} charge windows, "
+            logger.info(f"48h plan complete: {len(charging_windows)} charge windows, "
                        f"total {plan['total_charging_kwh']:.2f} kWh, "
                        f"min SOC {plan['min_soc_reached']:.1f}%")
 
