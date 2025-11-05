@@ -359,8 +359,17 @@ class TibberOptimizer:
                 hourly_prices.append(price)
 
             logger.info(f"Planning 48h battery schedule for {today} and {tomorrow}")
+            logger.info(f"Current hour: {current_hour}, Current SOC: {current_soc:.1f}%")
             logger.debug(f"Hourly consumption (48h): {[f'{c:.2f}' for c in hourly_consumption]}")
             logger.debug(f"Hourly PV (48h): {[f'{p:.2f}' for p in hourly_pv]}")
+
+            # Check for unrealistic consumption values
+            max_consumption = max(hourly_consumption)
+            if max_consumption > 10:
+                logger.warning(f"⚠️ Very high consumption detected: {max_consumption:.2f} kWh/h - this seems unrealistic!")
+
+            total_consumption_24h = sum(hourly_consumption[:24])
+            logger.info(f"Total consumption forecast for today: {total_consumption_24h:.1f} kWh")
 
             # 2. Simulate SOC without any grid charging (baseline) - 48 hours
             # Start from hour 0 and simulate forward to get correct SOC trajectory
@@ -605,6 +614,15 @@ class TibberOptimizer:
                 # Add: PV production + grid charging, Subtract: consumption
                 net_energy = hourly_pv[hour] + hourly_charging[hour] - hourly_consumption[hour]
                 soc_kwh += net_energy
+
+                # DEBUG: Log critical hours to understand the problem
+                if hour >= 20 and hour <= 30:
+                    logger.info(f"Hour {hour}: SOC_start={final_soc[hour]:.1f}%, "
+                              f"PV={hourly_pv[hour]:.2f}kWh, "
+                              f"Charging={hourly_charging[hour]:.2f}kWh, "
+                              f"Consumption={hourly_consumption[hour]:.2f}kWh, "
+                              f"Net={net_energy:.2f}kWh, "
+                              f"SOC_end={(soc_kwh / battery_capacity * 100):.1f}%")
 
                 # Clamp to battery limits
                 max_kwh = (max_soc / 100) * battery_capacity
