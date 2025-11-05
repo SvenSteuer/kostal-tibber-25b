@@ -363,23 +363,32 @@ class TibberOptimizer:
             logger.debug(f"Hourly PV (48h): {[f'{p:.2f}' for p in hourly_pv]}")
 
             # 2. Simulate SOC without any grid charging (baseline) - 48 hours
+            # Start from hour 0 and simulate forward to get correct SOC trajectory
             baseline_soc = [0.0] * 48
-            soc_kwh = (current_soc / 100) * battery_capacity
 
+            # Estimate SOC at midnight by back-calculating from current SOC
+            # This is an approximation - we subtract consumed energy and add PV since midnight
+            soc_at_midnight_kwh = (current_soc / 100) * battery_capacity
+            for h in range(0, current_hour):
+                # Reverse: add consumption, subtract PV (going backwards in time)
+                soc_at_midnight_kwh -= (hourly_pv[h] - hourly_consumption[h])
+
+            # Clamp to battery limits
+            max_kwh = (max_soc / 100) * battery_capacity
+            min_kwh = (min_soc / 100) * battery_capacity
+            soc_at_midnight_kwh = max(min_kwh, min(max_kwh, soc_at_midnight_kwh))
+
+            # Now simulate forward from midnight
+            soc_kwh = soc_at_midnight_kwh
             for hour in range(48):
-                if hour < current_hour:
-                    baseline_soc[hour] = current_soc  # Past hours: use current
-                else:
-                    # Future hours: simulate
-                    net_energy = hourly_pv[hour] - hourly_consumption[hour]
-                    soc_kwh += net_energy
+                # SOC at the beginning of this hour
+                baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-                    # Clamp to battery limits
-                    max_kwh = (max_soc / 100) * battery_capacity
-                    min_kwh = (min_soc / 100) * battery_capacity
-                    soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
-
-                    baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
+                # Apply energy changes during this hour: add PV, subtract consumption
+                net_energy = hourly_pv[hour] - hourly_consumption[hour]
+                soc_kwh += net_energy
+                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                # Now soc_kwh is SOC at end of hour (= start of next hour)
 
             # 3. Identify deficit hours (where SOC falls below minimum) - 48 hours
             deficit_hours = []
@@ -577,24 +586,31 @@ class TibberOptimizer:
                        f"{len([w for w in charging_windows if 'Economic' in w['reason']])} economic)")
 
             # 5. Re-simulate SOC with planned charging - 48 hours
+            # Start from hour 0 and simulate forward
             final_soc = [0.0] * 48
-            soc_kwh = (current_soc / 100) * battery_capacity
 
+            # Use the same estimated SOC at midnight as baseline
+            soc_at_midnight_kwh = (current_soc / 100) * battery_capacity
+            for h in range(0, current_hour):
+                soc_at_midnight_kwh -= (hourly_pv[h] - hourly_consumption[h])
+            soc_at_midnight_kwh = max(min_kwh, min(max_kwh, soc_at_midnight_kwh))
+
+            # Simulate forward with planned charging
+            soc_kwh = soc_at_midnight_kwh
             for hour in range(48):
-                if hour < current_hour:
-                    final_soc[hour] = current_soc
-                else:
-                    # Add: PV production + grid charging
-                    # Subtract: consumption
-                    net_energy = hourly_pv[hour] + hourly_charging[hour] - hourly_consumption[hour]
-                    soc_kwh += net_energy
+                # SOC at the beginning of this hour
+                final_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-                    # Clamp to battery limits
-                    max_kwh = (max_soc / 100) * battery_capacity
-                    min_kwh = (min_soc / 100) * battery_capacity
-                    soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                # Apply energy changes during this hour
+                # Add: PV production + grid charging, Subtract: consumption
+                net_energy = hourly_pv[hour] + hourly_charging[hour] - hourly_consumption[hour]
+                soc_kwh += net_energy
 
-                    final_soc[hour] = (soc_kwh / battery_capacity) * 100
+                # Clamp to battery limits
+                max_kwh = (max_soc / 100) * battery_capacity
+                min_kwh = (min_soc / 100) * battery_capacity
+                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                # Now soc_kwh is SOC at end of hour (= start of next hour)
 
             # 6. Return comprehensive 48-hour plan
             plan = {
