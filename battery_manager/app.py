@@ -62,23 +62,31 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 # Configuration
 CONFIG_PATH = os.getenv('CONFIG_PATH', '/data/options.json')
 
-def convert_planes_to_array(config):
+def normalize_planes_config(config):
     """
-    v1.0.4 - Convert individual plane fields to forecast_solar_planes array
+    v1.0.5 - Backward-compatible plane configuration normalization
 
-    Home Assistant schema doesn't support nested array structures, so we store
-    planes as individual fields (plane1_declination, plane1_azimuth, etc.)
-    and convert them to an array for internal use.
+    Supports BOTH formats for maximum compatibility:
+    1. Array format (new/standard): forecast_solar_planes: [{...}, {...}]
+    2. Individual fields (legacy): plane1_declination, plane1_azimuth, etc.
+
+    This ensures existing installations continue working while allowing
+    the array format to persist without being deleted by HA.
     """
+    # Check if array format already exists
+    if 'forecast_solar_planes' in config and isinstance(config.get('forecast_solar_planes'), list):
+        planes = config['forecast_solar_planes']
+        if planes:
+            logger.info(f"✓ Using existing forecast_solar_planes array: {len(planes)} plane(s)")
+            return config
+
+    # Fallback: Try to build from individual fields (for backward compatibility)
     planes = []
-
-    # Try to build planes from individual fields (up to 2 planes supported)
-    for i in range(1, 3):  # plane1, plane2
+    for i in range(1, 3):  # Support up to 2 planes
         declination = config.get(f'plane{i}_declination')
         azimuth = config.get(f'plane{i}_azimuth')
         kwp = config.get(f'plane{i}_kwp')
 
-        # Only add plane if all three values are present
         if declination is not None and azimuth is not None and kwp is not None:
             planes.append({
                 'declination': int(declination),
@@ -89,32 +97,8 @@ def convert_planes_to_array(config):
     if planes:
         config['forecast_solar_planes'] = planes
         logger.info(f"✓ Built forecast_solar_planes array from individual fields: {len(planes)} plane(s)")
-    else:
-        # Fallback: check if old array format exists
-        if 'forecast_solar_planes' not in config:
-            logger.warning("WARNING - Forecast.Solar API enabled but no planes configured")
-
-    return config
-
-def convert_planes_to_fields(config):
-    """
-    v1.0.4 - Convert forecast_solar_planes array to individual fields
-
-    When saving configuration from Web GUI (which sends array format),
-    convert back to individual fields for Home Assistant validation.
-    """
-    planes = config.get('forecast_solar_planes', [])
-
-    if planes and isinstance(planes, list):
-        for i, plane in enumerate(planes[:2], start=1):  # Max 2 planes
-            config[f'plane{i}_declination'] = int(plane.get('declination', 0))
-            config[f'plane{i}_azimuth'] = int(plane.get('azimuth', 0))
-            config[f'plane{i}_kwp'] = float(plane.get('kwp', 0))
-
-        # Remove array format before saving (HA can't validate it)
-        del config['forecast_solar_planes']
-
-        logger.info(f"✓ Converted forecast_solar_planes array to individual fields: {len(planes)} plane(s)")
+    elif config.get('enable_forecast_solar_api', False):
+        logger.warning("Forecast.Solar API enabled but no planes configured")
 
     return config
 
@@ -126,8 +110,8 @@ def load_config():
                 config = json.load(f)
                 logger.info(f"Configuration loaded from {CONFIG_PATH}")
 
-                # v1.0.4 - Convert individual plane fields to array
-                config = convert_planes_to_array(config)
+                # v1.0.5 - Normalize planes configuration (backward-compatible)
+                config = normalize_planes_config(config)
 
                 return config
         else:
@@ -175,13 +159,11 @@ def load_config():
         'charge_duration_per_10_percent': 18,
         'input_datetime_planned_charge_end': 'input_datetime.tibber_geplantes_ladeende',
         'input_datetime_planned_charge_start': 'input_datetime.tibber_geplanter_ladebeginn',
-        # v1.0.4 - Forecast.Solar planes (individual fields)
-        'plane1_declination': 22,
-        'plane1_azimuth': 45,
-        'plane1_kwp': 8.96,
-        'plane2_declination': 22,
-        'plane2_azimuth': -135,
-        'plane2_kwp': 10.665
+        # v1.0.5 - Forecast.Solar planes (array format)
+        'forecast_solar_planes': [
+            {'declination': 22, 'azimuth': 45, 'kwp': 8.96},
+            {'declination': 22, 'azimuth': -135, 'kwp': 10.665}
+        ]
     }
 
 # Load configuration
@@ -697,8 +679,9 @@ def api_config():
         try:
             new_config = request.json
 
-            # v1.0.4 - Convert forecast_solar_planes array to individual fields before saving
-            new_config = convert_planes_to_fields(new_config)
+            # v1.0.5 - No conversion needed, just save the config as-is
+            # The array format is supported directly in options.json
+            # (HA schema validation doesn't apply to forecast_solar_planes)
 
             # Update configuration
             config.update(new_config)
@@ -707,7 +690,7 @@ def api_config():
             with open(CONFIG_PATH, 'w') as f:
                 json.dump(config, f, indent=2)
 
-            # Reload config to rebuild array format for internal use
+            # Reload config to ensure consistency
             config = load_config()
 
             add_log('INFO', 'Configuration updated and saved')
