@@ -110,11 +110,17 @@ class ForecastSolarAPI:
                 data = response.json()
 
                 # Extract watt_hours data
-                if 'result' in data and 'watt_hours' in data['result']:
-                    watt_hours = data['result']['watt_hours']
-                    logger.debug(f"Plane {i+1}: received {len(watt_hours)} hourly values")
+                # The /estimate/watthours endpoint returns timestamps directly in 'result'
+                if 'result' in data:
+                    watt_hours = data['result']
 
-                    for timestamp_str, wh_value in watt_hours.items():
+                    # Filter out non-timestamp keys (API might include metadata)
+                    valid_entries = {k: v for k, v in watt_hours.items()
+                                   if isinstance(k, str) and len(k) >= 10}  # Timestamp format check
+
+                    logger.info(f"Plane {i+1}: received {len(valid_entries)} time intervals")
+
+                    for timestamp_str, wh_value in valid_entries.items():
                         try:
                             # Parse timestamp (format: "2025-11-05 14:00:00")
                             dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
@@ -128,18 +134,11 @@ class ForecastSolarAPI:
                                 hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + kwh
 
                         except (ValueError, TypeError) as e:
-                            logger.warning(f"Error parsing timestamp {timestamp_str}: {e}")
+                            logger.debug(f"Skipping entry {timestamp_str}: {e}")
                             continue
                 else:
-                    logger.warning(f"Plane {i+1}: No 'watt_hours' in API response")
-                    if 'result' in data:
-                        logger.warning(f"Available result keys: {list(data['result'].keys())}")
-                        # Log first 500 chars of response for debugging
-                        import json
-                        response_preview = json.dumps(data, indent=2)[:500]
-                        logger.warning(f"API response preview: {response_preview}")
-                    else:
-                        logger.warning(f"No 'result' key in response. Full response: {data}")
+                    logger.error(f"Plane {i+1}: No 'result' key in API response")
+                    logger.error(f"Full response: {data}")
 
             if hourly_forecast:
                 logger.info(f"✓ Forecast.Solar: Retrieved {len(hourly_forecast)} hours from API")
