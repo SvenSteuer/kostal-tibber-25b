@@ -62,6 +62,46 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 # Configuration
 CONFIG_PATH = os.getenv('CONFIG_PATH', '/data/options.json')
 
+def normalize_planes_config(config):
+    """
+    v1.0.5 - Backward-compatible plane configuration normalization
+
+    Supports BOTH formats for maximum compatibility:
+    1. Array format (new/standard): forecast_solar_planes: [{...}, {...}]
+    2. Individual fields (legacy): plane1_declination, plane1_azimuth, etc.
+
+    This ensures existing installations continue working while allowing
+    the array format to persist without being deleted by HA.
+    """
+    # Check if array format already exists
+    if 'forecast_solar_planes' in config and isinstance(config.get('forecast_solar_planes'), list):
+        planes = config['forecast_solar_planes']
+        if planes:
+            logger.info(f"✓ Using existing forecast_solar_planes array: {len(planes)} plane(s)")
+            return config
+
+    # Fallback: Try to build from individual fields (for backward compatibility)
+    planes = []
+    for i in range(1, 3):  # Support up to 2 planes
+        declination = config.get(f'plane{i}_declination')
+        azimuth = config.get(f'plane{i}_azimuth')
+        kwp = config.get(f'plane{i}_kwp')
+
+        if declination is not None and azimuth is not None and kwp is not None:
+            planes.append({
+                'declination': int(declination),
+                'azimuth': int(azimuth),
+                'kwp': float(kwp)
+            })
+
+    if planes:
+        config['forecast_solar_planes'] = planes
+        logger.info(f"✓ Built forecast_solar_planes array from individual fields: {len(planes)} plane(s)")
+    elif config.get('enable_forecast_solar_api', False):
+        logger.warning("Forecast.Solar API enabled but no planes configured")
+
+    return config
+
 def load_config():
     """Load configuration from Home Assistant options"""
     try:
@@ -69,12 +109,16 @@ def load_config():
             with open(CONFIG_PATH, 'r') as f:
                 config = json.load(f)
                 logger.info(f"Configuration loaded from {CONFIG_PATH}")
+
+                # v1.0.5 - Normalize planes configuration (backward-compatible)
+                config = normalize_planes_config(config)
+
                 return config
         else:
             logger.warning(f"Config file not found: {CONFIG_PATH}, using defaults")
     except Exception as e:
         logger.error(f"Error loading config: {e}")
-    
+
     # Default configuration
     return {
         'inverter_ip': '192.168.80.76',
@@ -114,7 +158,12 @@ def load_config():
         'tibber_price_threshold_3h': 8,
         'charge_duration_per_10_percent': 18,
         'input_datetime_planned_charge_end': 'input_datetime.tibber_geplantes_ladeende',
-        'input_datetime_planned_charge_start': 'input_datetime.tibber_geplanter_ladebeginn'
+        'input_datetime_planned_charge_start': 'input_datetime.tibber_geplanter_ladebeginn',
+        # v1.0.5 - Forecast.Solar planes (array format)
+        'forecast_solar_planes': [
+            {'declination': 22, 'azimuth': 45, 'kwp': 8.96},
+            {'declination': 22, 'azimuth': -135, 'kwp': 10.665}
+        ]
     }
 
 # Load configuration
@@ -259,6 +308,7 @@ try:
             api_key = config.get('forecast_solar_api_key')
             latitude = config.get('forecast_solar_latitude')
             longitude = config.get('forecast_solar_longitude')
+            planes = config.get('forecast_solar_planes', [])
 
             if api_key and latitude is not None and longitude is not None:
                 forecast_solar_api = ForecastSolarAPI(api_key, latitude, longitude)
@@ -267,7 +317,12 @@ try:
                 if tibber_optimizer:
                     tibber_optimizer.set_forecast_solar_api(forecast_solar_api)
 
-                add_log('INFO', f'Forecast.Solar Professional API enabled (lat={latitude}, lon={longitude})')
+                # v1.0.4 - Check if planes are configured
+                if planes:
+                    add_log('INFO', f'Forecast.Solar Professional API enabled (lat={latitude}, lon={longitude}, {len(planes)} planes)')
+                else:
+                    logger.warning("Forecast.Solar API enabled but no planes configured")
+                    add_log('WARNING', 'Forecast.Solar API enabled but no planes configured')
             else:
                 logger.warning("Forecast.Solar API enabled but missing configuration (api_key, latitude, longitude)")
                 add_log('WARNING', 'Forecast.Solar API: Missing configuration parameters')
@@ -619,18 +674,25 @@ def api_status():
 def api_config():
     """Get or update configuration"""
     global config
-    
+
     if request.method == 'POST':
         try:
             new_config = request.json
-            
+
+            # v1.0.5 - No conversion needed, just save the config as-is
+            # The array format is supported directly in options.json
+            # (HA schema validation doesn't apply to forecast_solar_planes)
+
             # Update configuration
             config.update(new_config)
-            
+
             # Save to file
             with open(CONFIG_PATH, 'w') as f:
                 json.dump(config, f, indent=2)
-            
+
+            # Reload config to ensure consistency
+            config = load_config()
+
             add_log('INFO', 'Configuration updated and saved')
             return jsonify({
                 'status': 'ok',
@@ -642,7 +704,7 @@ def api_config():
                 'status': 'error',
                 'message': str(e)
             }), 500
-    
+
     return jsonify(config)
 
 @app.route('/api/control', methods=['POST'])
