@@ -416,7 +416,85 @@ class TibberOptimizer:
                         'reason': f'Prepare for deficit at {deficit_hour}:00'
                     })
 
-            logger.info(f"Planned {len(charging_windows)} charging windows")
+            logger.info(f"Planned {len(charging_windows)} deficit-based charging windows")
+
+            # 4b. ECONOMIC OPTIMIZATION: Opportunistic charging at cheap prices (v1.0.9)
+            # Only charge if economically beneficial AND battery won't be filled by PV anyway
+            economic_threshold = 1.10  # Minimum 10% cost saving required
+            negative_price_threshold = 0.0  # Charge if price <= 0 (we get paid!)
+
+            for hour in range(current_hour, 24):
+                # Skip if already charging in this hour
+                if hourly_charging[hour] > 0:
+                    continue
+
+                # Simulate SOC at this hour with PV but WITHOUT new grid charging
+                temp_soc_kwh = (current_soc / 100) * battery_capacity
+                for h in range(current_hour, hour + 1):
+                    if h < current_hour:
+                        continue
+                    # Include only: PV + existing planned charging - consumption
+                    net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
+                    temp_soc_kwh += net
+                    temp_soc_kwh = max(0, min((max_soc / 100) * battery_capacity, temp_soc_kwh))
+
+                soc_at_hour = (temp_soc_kwh / battery_capacity) * 100
+
+                # Check available battery space (considering PV will fill it)
+                available_space_kwh = ((max_soc - soc_at_hour) / 100) * battery_capacity
+
+                # Skip if battery will be nearly full anyway
+                if available_space_kwh < 0.5:
+                    continue
+
+                # Special case: NEGATIVE PRICES - always charge (we get paid!)
+                if hourly_prices[hour] <= negative_price_threshold:
+                    charge_kwh = min(available_space_kwh, max_charge_power)
+                    hourly_charging[hour] = charge_kwh
+                    charging_windows.append({
+                        'hour': hour,
+                        'charge_kwh': charge_kwh,
+                        'price': hourly_prices[hour],
+                        'reason': f'NEGATIVE PRICE: {hourly_prices[hour]*100:.2f} Ct/kWh (we get paid to charge!)'
+                    })
+                    logger.info(f"💰 Negative price at {hour}:00: Charging {charge_kwh:.2f} kWh @ {hourly_prices[hour]*100:.2f} Ct/kWh")
+                    continue
+
+                # Find future expensive hours where this stored energy would be used
+                future_expensive_hours = []
+                for future_h in range(hour + 1, 24):
+                    if hourly_prices[future_h] > hourly_prices[hour] * economic_threshold:
+                        future_expensive_hours.append(future_h)
+
+                # Skip if no future expensive hours
+                if not future_expensive_hours:
+                    continue
+
+                # Calculate average expensive price
+                avg_expensive_price = sum(hourly_prices[h] for h in future_expensive_hours) / len(future_expensive_hours)
+
+                # Economic decision: Is it worth charging now?
+                cost_per_kwh = hourly_prices[hour]
+                benefit_per_kwh = avg_expensive_price
+
+                if benefit_per_kwh > cost_per_kwh * economic_threshold:
+                    # Economically beneficial!
+                    charge_kwh = min(available_space_kwh, max_charge_power)
+
+                    hourly_charging[hour] = charge_kwh
+                    charging_windows.append({
+                        'hour': hour,
+                        'charge_kwh': charge_kwh,
+                        'price': cost_per_kwh,
+                        'reason': f'Economic: Buy @ {cost_per_kwh*100:.2f} Ct/kWh, avoid @ {benefit_per_kwh*100:.2f} Ct/kWh later'
+                    })
+
+                    logger.info(f"Economic charging at {hour}:00: {charge_kwh:.2f} kWh @ {cost_per_kwh*100:.2f} Ct/kWh "
+                              f"(saves {(benefit_per_kwh - cost_per_kwh)*100:.2f} Ct/kWh)")
+
+            logger.info(f"Total charging windows planned: {len(charging_windows)} "
+                       f"({len([w for w in charging_windows if 'deficit' in w['reason'].lower()])} deficit, "
+                       f"{len([w for w in charging_windows if 'Economic' in w['reason']])} economic)")
 
             # 5. Re-simulate SOC with planned charging
             final_soc = [0.0] * 24
