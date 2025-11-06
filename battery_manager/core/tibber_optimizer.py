@@ -53,12 +53,12 @@ class TibberOptimizer:
         if (self.forecast_solar_api and
             config.get('enable_forecast_solar_api', False)):
 
-            logger.debug("Using Forecast.Solar Professional API for PV forecast")
+            logger.debug(f"Using Forecast.Solar Professional API for PV forecast (include_tomorrow={include_tomorrow})")
 
             planes = config.get('forecast_solar_planes', [])
             if planes:
                 try:
-                    hourly_forecast = self.forecast_solar_api.get_hourly_forecast(planes)
+                    hourly_forecast = self.forecast_solar_api.get_hourly_forecast(planes, include_tomorrow=include_tomorrow)
                     if hourly_forecast:
                         return hourly_forecast
                     else:

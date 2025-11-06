@@ -63,25 +63,31 @@ class ForecastSolarAPI:
 
     def get_hourly_forecast(self,
                            planes: list,
-                           days: int = 1) -> Dict[int, float]:
+                           include_tomorrow: bool = False) -> Dict[int, float]:
         """
-        Get hourly solar production forecast for today
+        Get hourly solar production forecast for today (and optionally tomorrow)
 
         Args:
             planes: List of dicts with 'declination', 'azimuth', 'kwp'
                    e.g., [{'declination': 22, 'azimuth': 45, 'kwp': 8.96}]
-            days: Number of days to forecast (default: 1 = today only)
+            include_tomorrow: If True, returns 48h forecast (today=0-23, tomorrow=24-47)
 
         Returns:
-            dict: {hour: kwh_forecast} for each hour (0-23)
+            dict: {hour: kwh_forecast} for each hour
+                  If include_tomorrow=False: hour 0-23 (today only)
+                  If include_tomorrow=True: hour 0-47 (today=0-23, tomorrow=24-47)
         """
         # Check cache first
+        cache_key = f'hourly_forecast_tomorrow_{include_tomorrow}'
         if self._is_cache_valid():
-            logger.debug("Using cached forecast.solar data")
-            return self._cache.get('hourly_forecast', {})
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"Using cached forecast.solar data (include_tomorrow={include_tomorrow})")
+                return cached
 
         try:
             today = datetime.now().astimezone().date()
+            tomorrow = today + timedelta(days=1)
             hourly_forecast = {}
 
             # Fetch forecast for each plane and combine
@@ -124,52 +130,80 @@ class ForecastSolarAPI:
                     # We need to convert each plane's cumulative values to hourly deltas first,
                     # then combine the deltas from all planes
 
-                    # Step 1: Collect cumulative values for THIS plane, sorted by hour
-                    plane_cumulative = {}
+                    # Step 1: Collect cumulative values for THIS plane, by date and hour
+                    plane_cumulative_today = {}
+                    plane_cumulative_tomorrow = {}
+
                     for timestamp_str, wh_value in valid_entries.items():
                         try:
                             # Parse timestamp (format: "2025-11-05 14:00:00")
                             dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                            kwh = float(wh_value) / 1000.0  # Wh to kWh
 
-                            # Only process today's data (or up to 'days' ahead)
+                            # Process today's data
                             if dt.date() == today:
                                 hour = dt.hour
-                                kwh = float(wh_value) / 1000.0  # Wh to kWh
-                                plane_cumulative[hour] = kwh
+                                plane_cumulative_today[hour] = kwh
+                            # Process tomorrow's data (if requested)
+                            elif include_tomorrow and dt.date() == tomorrow:
+                                hour = dt.hour
+                                plane_cumulative_tomorrow[hour] = kwh
 
                         except (ValueError, TypeError) as e:
                             logger.debug(f"Skipping entry {timestamp_str}: {e}")
                             continue
 
-                    # Step 2: Convert THIS plane's cumulative values to hourly deltas
-                    if plane_cumulative:
-                        sorted_hours = sorted(plane_cumulative.keys())
-                        logger.debug(f"Plane {i+1}: Converting cumulative to hourly deltas for hours {sorted_hours}")
+                    # Step 2: Convert THIS plane's cumulative values to hourly deltas for TODAY
+                    if plane_cumulative_today:
+                        sorted_hours = sorted(plane_cumulative_today.keys())
+                        logger.debug(f"Plane {i+1}: Converting today's cumulative to hourly deltas for hours {sorted_hours}")
 
                         for idx, hour in enumerate(sorted_hours):
                             if idx == 0:
                                 # First hour: use cumulative value as-is (production from midnight to this hour)
-                                hourly_delta = plane_cumulative[hour]
+                                hourly_delta = plane_cumulative_today[hour]
                             else:
                                 # Subsequent hours: subtract previous cumulative from current
                                 prev_hour = sorted_hours[idx - 1]
-                                hourly_delta = plane_cumulative[hour] - plane_cumulative[prev_hour]
+                                hourly_delta = plane_cumulative_today[hour] - plane_cumulative_today[prev_hour]
                                 hourly_delta = max(0.0, hourly_delta)  # Can't be negative
 
-                            # Step 3: Add this plane's hourly delta to the combined forecast
+                            # Step 3: Add this plane's hourly delta to the combined forecast (hour 0-23)
                             hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + hourly_delta
 
-                        logger.debug(f"Plane {i+1}: Converted {len(plane_cumulative)} cumulative values to hourly deltas")
+                        logger.debug(f"Plane {i+1}: Converted {len(plane_cumulative_today)} today's cumulative values to hourly deltas")
+
+                    # Step 2b: Convert THIS plane's cumulative values to hourly deltas for TOMORROW
+                    if include_tomorrow and plane_cumulative_tomorrow:
+                        sorted_hours = sorted(plane_cumulative_tomorrow.keys())
+                        logger.debug(f"Plane {i+1}: Converting tomorrow's cumulative to hourly deltas for hours {sorted_hours}")
+
+                        for idx, hour in enumerate(sorted_hours):
+                            if idx == 0:
+                                # First hour: use cumulative value as-is
+                                hourly_delta = plane_cumulative_tomorrow[hour]
+                            else:
+                                # Subsequent hours: subtract previous cumulative from current
+                                prev_hour = sorted_hours[idx - 1]
+                                hourly_delta = plane_cumulative_tomorrow[hour] - plane_cumulative_tomorrow[prev_hour]
+                                hourly_delta = max(0.0, hourly_delta)  # Can't be negative
+
+                            # Step 3: Add this plane's hourly delta to the combined forecast (hour 24-47)
+                            tomorrow_hour = hour + 24  # Offset by 24 hours
+                            hourly_forecast[tomorrow_hour] = hourly_forecast.get(tomorrow_hour, 0.0) + hourly_delta
+
+                        logger.debug(f"Plane {i+1}: Converted {len(plane_cumulative_tomorrow)} tomorrow's cumulative values to hourly deltas")
+
                 else:
                     logger.error(f"Plane {i+1}: No 'result' key in API response")
                     logger.error(f"Full response: {data}")
 
             if hourly_forecast:
-                logger.info(f"✓ Forecast.Solar: Retrieved {len(hourly_forecast)} hours from API")
+                logger.info(f"✓ Forecast.Solar: Retrieved {len(hourly_forecast)} hours from API (include_tomorrow={include_tomorrow})")
                 logger.debug(f"Hourly forecast (kWh): {hourly_forecast}")
 
                 # Update cache
-                self._cache = {'hourly_forecast': hourly_forecast}
+                self._cache[cache_key] = hourly_forecast
                 self._cache_timestamp = datetime.now()
             else:
                 logger.warning("No hourly forecast data retrieved from Forecast.Solar API")
