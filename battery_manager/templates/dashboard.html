@@ -766,6 +766,16 @@ function initCharts() {
                         borderWidth: 1,
                         yAxisID: 'y-charging',
                         order: 2  // Draw bars behind line
+                    },
+                    {
+                        type: 'bar',
+                        label: 'PV-Ertrag (kWh)',
+                        data: [],
+                        backgroundColor: 'rgba(255, 193, 7, 0.6)',
+                        borderColor: 'rgb(255, 193, 7)',
+                        borderWidth: 1,
+                        yAxisID: 'y-charging',
+                        order: 3  // Draw behind charging bars
                     }
                 ]
             },
@@ -786,6 +796,8 @@ function initCharts() {
                             label: function(context) {
                                 if (context.dataset.yAxisID === 'y-soc') {
                                     return 'SOC: ' + context.parsed.y.toFixed(1) + '%';
+                                } else if (context.dataset.label.includes('PV')) {
+                                    return 'PV: ' + context.parsed.y.toFixed(2) + ' kWh';
                                 } else {
                                     return 'Ladung: ' + context.parsed.y.toFixed(2) + ' kWh';
                                 }
@@ -961,6 +973,9 @@ function updateBatteryScheduleChart() {
 
                 // Update planned charging (red bars) - 48 hours
                 batteryScheduleChart.data.datasets[1].data = data.hourly_charging || Array(48).fill(0);
+
+                // Update PV production (yellow bars) - 48 hours (v1.2.0-beta.38)
+                batteryScheduleChart.data.datasets[2].data = data.hourly_pv || Array(48).fill(0);
 
                 batteryScheduleChart.update();
 
