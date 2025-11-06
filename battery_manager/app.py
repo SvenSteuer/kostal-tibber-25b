@@ -1285,39 +1285,67 @@ def api_consumption_import_ha():
                 'error': 'Home Assistant client not available'
             }), 400
 
-        # v1.2.0-beta.10: Use calculated consumption (Grid + PV) instead of single sensor
-        # This matches the automatic recording logic for consistency
-        grid_sensor = config.get('home_consumption_sensor')  # This is actually the grid sensor
+        # v1.2.0-beta.11: Support dual grid sensors (FROM/TO) or legacy single grid sensor
+        grid_from_sensor = config.get('grid_from_sensor')
+        grid_to_sensor = config.get('grid_to_sensor')
         pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
 
-        if not grid_sensor:
-            return jsonify({
-                'success': False,
-                'error': 'home_consumption_sensor (grid sensor) not configured'
-            }), 400
+        # Validate configuration
+        if grid_from_sensor and grid_to_sensor:
+            # Dual grid sensor mode (Kostal KSEM with separate FROM/TO sensors)
+            add_log('INFO', '🔧 Using dual grid sensor mode (FROM/TO)')
 
-        if not pv_sensor:
-            return jsonify({
-                'success': False,
-                'error': 'pv_total_sensor not configured'
-            }), 400
+            if not pv_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'pv_total_sensor not configured'
+                }), 400
 
-        days = request.json.get('days', 28) if request.json else 28
+            days = request.json.get('days', 28) if request.json else 28
 
-        add_log('INFO', f'Starting HA import with calculated consumption (Grid + PV) for last {days} days...')
-        add_log('INFO', f'Grid sensor: {grid_sensor}, PV sensor: {pv_sensor}')
+            add_log('INFO', f'Starting HA import with calculated consumption (PV + GridFrom - GridTo) for last {days} days...')
+            add_log('INFO', f'GridFrom: {grid_from_sensor}, GridTo: {grid_to_sensor}, PV: {pv_sensor}')
 
-        # Clear all manually imported data before importing new data
-        deleted = consumption_learner.clear_all_manual_data()
-        add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
+            # Clear all manually imported data before importing new data
+            deleted = consumption_learner.clear_all_manual_data()
+            add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
 
-        # v1.2.0-beta.10: Use new calculated import method (Home = PV + Grid)
-        result = consumption_learner.import_calculated_consumption_from_ha(
-            ha_client, grid_sensor, pv_sensor, days
-        )
+            # v1.2.0-beta.11: Use new dual grid import method
+            result = consumption_learner.import_calculated_consumption_dual_grid(
+                ha_client, grid_from_sensor, grid_to_sensor, pv_sensor, days
+            )
+        else:
+            # Legacy single grid sensor mode (signed values: positive=import, negative=export)
+            grid_sensor = config.get('home_consumption_sensor')
+
+            if not grid_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'Neither dual grid sensors (grid_from_sensor, grid_to_sensor) nor legacy home_consumption_sensor configured'
+                }), 400
+
+            if not pv_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'pv_total_sensor not configured'
+                }), 400
+
+            days = request.json.get('days', 28) if request.json else 28
+
+            add_log('INFO', f'Starting HA import with calculated consumption (Grid + PV) for last {days} days...')
+            add_log('INFO', f'Grid sensor: {grid_sensor}, PV sensor: {pv_sensor}')
+
+            # Clear all manually imported data before importing new data
+            deleted = consumption_learner.clear_all_manual_data()
+            add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
+
+            # v1.2.0-beta.10: Use legacy calculated import method (Home = PV + Grid)
+            result = consumption_learner.import_calculated_consumption_from_ha(
+                ha_client, grid_sensor, pv_sensor, days
+            )
 
         if result['success']:
-            add_log('INFO', f'✅ HA Import: {result["imported_hours"]} Stundenwerte aus Home Assistant importiert (berechnet aus Grid + PV)')
+            add_log('INFO', f'✅ HA Import: {result["imported_hours"]} Stundenwerte aus Home Assistant importiert')
             return jsonify(result)
         else:
             add_log('ERROR', f'❌ HA Import fehlgeschlagen: {result.get("error", "Unknown error")}')
