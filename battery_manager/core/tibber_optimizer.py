@@ -475,6 +475,25 @@ class TibberOptimizer:
                 logger.info(f"  Lowest baseline SOC: {min(baseline_soc[first_deficit_hour:]):.1f}%")
                 logger.info(f"  Energy needed (cumulative): {total_deficit_kwh:.2f} kWh")
 
+                # v1.2.0-beta.25: SMART - Target the most EXPENSIVE deficit hours, not just the first one
+                # Sort deficit hours by price (most expensive first)
+                deficit_hours_sorted_by_price = sorted(deficit_hours, key=lambda x: x['price'], reverse=True)
+
+                # Find the most expensive deficit hours that we should cover
+                # Use top 50% of deficit hours or at least the first 3 hours
+                expensive_deficit_count = max(3, len(deficit_hours) // 2)
+                expensive_deficits = deficit_hours_sorted_by_price[:expensive_deficit_count]
+
+                # Find the LATEST hour among the expensive deficits - we must be charged by then
+                target_hour = max(d['hour'] for d in expensive_deficits)
+
+                # Log the expensive deficit hours we're targeting
+                expensive_prices = [d['price'] * 100 for d in expensive_deficits]
+                logger.info(f"💰 Targeting {len(expensive_deficits)} most expensive deficit hours: "
+                          f"Hours {sorted([d['hour'] for d in expensive_deficits])}, "
+                          f"Prices {[f'{p:.1f}' for p in expensive_prices]} Ct/kWh")
+                logger.info(f"⏰ Must be charged by hour {target_hour} (latest expensive deficit)")
+
                 # SMART: Don't charge if SOC is already high - let it discharge naturally first
                 # Find when SOC drops below "ready to charge" threshold (max_soc - 10%)
                 charge_ready_threshold = max_soc - 10  # e.g. 98% - 10% = 88%
@@ -491,20 +510,20 @@ class TibberOptimizer:
                     logger.info(f"⏳ Current SOC {current_soc:.1f}% > {charge_ready_threshold:.1f}%, "
                               f"waiting until hour {earliest_charge_hour} to start charging")
 
-                # Check if we have enough time to charge
+                # Check if we have enough time to charge BEFORE the target hour
                 import math
                 needed_hours = math.ceil(total_deficit_kwh / max_charge_power)
-                available_hours_count = first_deficit_hour - earliest_charge_hour
+                available_hours_count = target_hour - earliest_charge_hour
 
                 if available_hours_count < needed_hours:
                     # Not enough time! Must start earlier
-                    earliest_charge_hour = max(0, first_deficit_hour - needed_hours)
+                    earliest_charge_hour = max(0, target_hour - needed_hours)
                     logger.warning(f"⚠️ Not enough time! Need {needed_hours}h, only {available_hours_count}h available. "
                                  f"Starting from hour {earliest_charge_hour} instead")
 
-                # Find available hours BETWEEN earliest_charge_hour and first_deficit_hour
+                # Find available hours BETWEEN earliest_charge_hour and target_hour
                 available_hours = []
-                for h in range(earliest_charge_hour, first_deficit_hour):
+                for h in range(earliest_charge_hour, target_hour):
                     available_hours.append({
                         'hour': h,
                         'price': hourly_prices[h]
@@ -527,11 +546,16 @@ class TibberOptimizer:
                     hourly_charging[hour] = charge_kwh
                     remaining_kwh -= charge_kwh
 
+                    # Build reason text with expensive deficit hours
+                    expensive_hours_str = ', '.join([str(d['hour']) for d in expensive_deficits[:5]])
+                    if len(expensive_deficits) > 5:
+                        expensive_hours_str += f' (+{len(expensive_deficits)-5} more)'
+
                     charging_windows.append({
                         'hour': hour,
                         'charge_kwh': charge_kwh,
                         'price': slot['price'],
-                        'reason': f'Cover {len(deficit_hours)} deficits starting at hour {first_deficit_hour}'
+                        'reason': f'Target expensive hours {expensive_hours_str}'
                     })
 
                 logger.info(f"💡 Charging Strategy: {len(charging_windows)} windows with FULL POWER ({max_charge_power:.2f} kW)")
