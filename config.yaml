@@ -1,5 +1,5 @@
 name: Kostal Battery Manager
-version: "1.2.0-beta.26"
+version: "1.2.0-beta.27"
 slug: kostal_battery_manager
 description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und 48h-Grafiken"
 url: "https://github.com/SvenSteuer/kostal-battery-manager"
@@ -46,7 +46,7 @@ options:
   auto_optimization_enabled: true
   # v0.2.5 - Automation Parameters
   auto_pv_threshold: 5.0  # PV-Schwelle: Lade nur aus Netz wenn weniger PV erwartet (kWh)
-  auto_charge_below_soc: 95  # Ziel-SOC: Lade BIS zu diesem SOC-Wert (%)
+  auto_charge_below_soc: 98  # Ziel-SOC: Lade BIS zu diesem SOC-Wert (%) - Wählbar: 85, 90, 95, 98, 100
   auto_safety_soc: 20  # Sicherheits-SOC: Lade SOFORT wenn SOC unter diesem Wert fällt (%)
   # PV Production Sensors (v0.2.1 - beide Dachausrichtungen)
   pv_power_now_roof1: "sensor.power_production_now_roof1"
@@ -157,7 +157,7 @@ schema:
 
   # v0.2.5 - Automation Parameters
   auto_pv_threshold: float(0.0,50.0)
-  auto_charge_below_soc: int(10,100)
+  auto_charge_below_soc: list(85|90|95|98|100)
   auto_safety_soc: int(5,50)
 
   # v0.2.1 - PV Production Sensors (Dual Roof)
