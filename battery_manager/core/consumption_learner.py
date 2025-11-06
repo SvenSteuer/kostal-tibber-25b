@@ -377,6 +377,34 @@ class ConsumptionLearner:
 
             logger.info(f"Received {len(grid_from_history)} FROM entries, {len(grid_to_history)} TO entries, {len(pv_history)} PV entries" + (f", {len(battery_history)} battery entries" if battery_history else ""))
 
+            # Get sensor units to determine correct conversion (v1.2.0-beta.13)
+            logger.info("Detecting sensor units...")
+            grid_from_unit = None
+            grid_to_unit = None
+            pv_unit = None
+            battery_unit = None
+
+            grid_from_info = ha_client.get_state_with_attributes(grid_from_sensor)
+            if grid_from_info:
+                grid_from_unit = grid_from_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+                logger.info(f"GridFrom sensor unit: {grid_from_unit}")
+
+            grid_to_info = ha_client.get_state_with_attributes(grid_to_sensor)
+            if grid_to_info:
+                grid_to_unit = grid_to_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+                logger.info(f"GridTo sensor unit: {grid_to_unit}")
+
+            pv_info = ha_client.get_state_with_attributes(pv_sensor)
+            if pv_info:
+                pv_unit = pv_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+                logger.info(f"PV sensor unit: {pv_unit}")
+
+            if battery_sensor:
+                battery_info = ha_client.get_state_with_attributes(battery_sensor)
+                if battery_info:
+                    battery_unit = battery_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+                    logger.info(f"Battery sensor unit: {battery_unit}")
+
             # Process grid FROM sensor data
             grid_from_hourly_data = {}  # Key: (date, hour), Value: list of values (kW)
 
@@ -404,11 +432,15 @@ class ConsumptionLearner:
                         continue
 
                     # Skip unrealistically high values
-                    if value > 50000:  # > 50 kW
+                    if value > 50000:  # > 50 kW or 50000 W
                         continue
 
-                    # Convert W to kW if needed (values > 50 are likely W)
-                    if value > 50:
+                    # Convert based on sensor unit (v1.2.0-beta.13)
+                    if grid_from_unit and ('kw' in grid_from_unit or 'kilowatt' in grid_from_unit):
+                        # Already in kW, no conversion needed
+                        pass
+                    else:
+                        # Assume Watts, convert to kW
                         value = value / 1000
 
                     date_key = local_timestamp.date()
@@ -450,11 +482,15 @@ class ConsumptionLearner:
                         continue
 
                     # Skip unrealistically high values
-                    if value > 50000:  # > 50 kW
+                    if value > 50000:  # > 50 kW or 50000 W
                         continue
 
-                    # Convert W to kW if needed
-                    if value > 50:
+                    # Convert based on sensor unit (v1.2.0-beta.13)
+                    if grid_to_unit and ('kw' in grid_to_unit or 'kilowatt' in grid_to_unit):
+                        # Already in kW, no conversion needed
+                        pass
+                    else:
+                        # Assume Watts, convert to kW
                         value = value / 1000
 
                     date_key = local_timestamp.date()
@@ -495,11 +531,15 @@ class ConsumptionLearner:
                         continue
 
                     # Skip unrealistically high values
-                    if value > 50000:  # > 50 kW
+                    if value > 50000:  # > 50 kW or 50000 W
                         continue
 
-                    # Convert W to kW if needed
-                    if value > 50:
+                    # Convert based on sensor unit (v1.2.0-beta.13)
+                    if pv_unit and ('kw' in pv_unit or 'kilowatt' in pv_unit):
+                        # Already in kW, no conversion needed
+                        pass
+                    else:
+                        # Assume Watts, convert to kW
                         value = value / 1000
 
                     date_key = local_timestamp.date()
@@ -538,11 +578,15 @@ class ConsumptionLearner:
 
                         # Battery can be positive (discharge) or negative (charge)
                         # Skip unrealistically high values
-                        if abs(value) > 50000:  # > 50 kW
+                        if abs(value) > 50000:  # > 50 kW or 50000 W
                             continue
 
-                        # Convert W to kW if needed
-                        if abs(value) > 50:
+                        # Convert based on sensor unit (v1.2.0-beta.13)
+                        if battery_unit and ('kw' in battery_unit or 'kilowatt' in battery_unit):
+                            # Already in kW, no conversion needed
+                            pass
+                        else:
+                            # Assume Watts, convert to kW
                             value = value / 1000
 
                         date_key = local_timestamp.date()
