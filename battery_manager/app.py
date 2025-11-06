@@ -1946,13 +1946,17 @@ def controller_loop():
                         # Use daily schedule if available
                         elif app_state['daily_battery_schedule']:
                             schedule = app_state['daily_battery_schedule']
-                            current_hour = now.hour
+                            current_hour = now.hour  # 0-23 for today
+
+                            # v1.1.0: In 48h schedule, hours 0-23 = today, 24-47 = tomorrow
+                            # We only check TODAY's hours (0-23) for immediate charging decisions
 
                             # Check if current hour is in charging windows
                             charging_windows = schedule.get('charging_windows', [])
                             current_window = None
                             for window in charging_windows:
-                                if window['hour'] == current_hour:
+                                # Only check TODAY's windows (hour 0-23)
+                                if window['hour'] < 24 and window['hour'] == current_hour:
                                     current_window = window
                                     break
 
@@ -1961,25 +1965,24 @@ def controller_loop():
                                 reason = (f"Planned charging window: {current_window['charge_kwh']:.2f} kWh "
                                         f"@ {current_window['price']*100:.2f} Cent/kWh "
                                         f"({current_window['reason']})")
+                                logger.info(f"🔌 CHARGING NOW: Hour {current_hour} - {reason}")
                             else:
                                 should_charge = False
                                 min_soc_forecast = schedule.get('min_soc_reached', 100)
                                 reason = f"No charging needed - Schedule OK (min SOC: {min_soc_forecast:.1f}%)"
 
-                        else:
-                            # Fallback if no schedule available (v0.8.1 method)
-                            planned_start = None
-                            if app_state['charging_plan']['planned_start']:
-                                planned_start = datetime.fromisoformat(app_state['charging_plan']['planned_start'])
+                                # Debug: Show which charging windows exist for today
+                                today_windows = [w for w in charging_windows if w['hour'] < 24]
+                                if today_windows:
+                                    logger.debug(f"⏸️ NOT charging at hour {current_hour}. Today's charging windows: {[w['hour'] for w in today_windows]}")
+                                else:
+                                    logger.debug(f"⏸️ NOT charging - no charging windows planned for today")
 
-                            should_charge, reason = tibber_optimizer.should_charge_now(
-                                planned_start=planned_start,
-                                current_soc=current_soc,
-                                min_soc=min_soc,
-                                max_soc=max_soc,
-                                ha_client=ha_client,
-                                config=config
-                            )
+                        else:
+                            # No schedule available - don't charge
+                            should_charge = False
+                            reason = "No charging schedule available - waiting for next calculation"
+                            logger.warning("⚠️ No daily battery schedule available for charging decision")
 
                         # Aktion ausführen
                         if should_charge and app_state['inverter']['mode'] not in ['manual_charging', 'auto_charging']:
