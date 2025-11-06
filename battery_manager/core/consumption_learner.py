@@ -571,6 +571,7 @@ class ConsumptionLearner:
             logger.info(f"Found {len(all_keys)} hours with grid sensors (FROM and TO)")
 
             for key in all_keys:
+                date_key, hour_key = key
                 grid_from_values = grid_from_hourly_data[key]
                 grid_to_values = grid_to_hourly_data[key]
 
@@ -580,15 +581,19 @@ class ConsumptionLearner:
 
                 # PV: Use 0 if no data (e.g., at night when PV sensor doesn't log)
                 pv_avg_kw = 0
+                pv_count = 0
                 if key in pv_hourly_data:
                     pv_values = pv_hourly_data[key]
                     pv_avg_kw = sum(pv_values) / len(pv_values)
+                    pv_count = len(pv_values)
 
                 # Battery: Use 0 if no data (positive = discharge, negative = charge)
                 battery_avg_kw = 0
+                battery_count = 0
                 if key in battery_hourly_data:
                     battery_values = battery_hourly_data[key]
                     battery_avg_kw = sum(battery_values) / len(battery_values)
+                    battery_count = len(battery_values)
 
                 # Calculate net grid power (positive = import, negative = export)
                 grid_net_kw = grid_from_avg_kw - grid_to_avg_kw
@@ -596,6 +601,23 @@ class ConsumptionLearner:
                 # Calculate home consumption: Home = PV + GridNet + Battery
                 # This matches: Hausverbrauch = Netzbezug - Netzeinspeisung + PV + Batterie
                 home_avg_kw = pv_avg_kw + grid_net_kw + battery_avg_kw
+
+                # DEBUG: Log detailed calculation for specific date/hour (5.11. 11:00)
+                if date_key.month == 11 and date_key.day == 5 and hour_key == 11:
+                    logger.info(f"🔍 DEBUG {date_key} {hour_key}:00 - DETAILED CALCULATION:")
+                    logger.info(f"  GridFrom: {len(grid_from_values)} values, avg={grid_from_avg_kw:.3f} kW, raw values: {[f'{v:.3f}' for v in grid_from_values[:10]]}")
+                    logger.info(f"  GridTo: {len(grid_to_values)} values, avg={grid_to_avg_kw:.3f} kW, raw values: {[f'{v:.3f}' for v in grid_to_values[:10]]}")
+                    if pv_count > 0:
+                        logger.info(f"  PV: {pv_count} values, avg={pv_avg_kw:.3f} kW, raw values: {[f'{v:.3f}' for v in pv_values[:10]]}")
+                    else:
+                        logger.info(f"  PV: No data - using 0 kW")
+                    if battery_count > 0:
+                        logger.info(f"  Battery: {battery_count} values, avg={battery_avg_kw:.3f} kW, raw values: {[f'{v:.3f}' for v in battery_values[:10]]}")
+                    else:
+                        logger.info(f"  Battery: No data - using 0 kW")
+                    logger.info(f"  GridNet = GridFrom - GridTo = {grid_from_avg_kw:.3f} - {grid_to_avg_kw:.3f} = {grid_net_kw:.3f} kW")
+                    logger.info(f"  HOME = PV + GridNet + Battery = {pv_avg_kw:.3f} + {grid_net_kw:.3f} + {battery_avg_kw:.3f} = {home_avg_kw:.3f} kWh")
+
 
                 # Validate result
                 if home_avg_kw < 0:
