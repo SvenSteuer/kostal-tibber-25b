@@ -425,6 +425,11 @@ class TibberOptimizer:
             charging_windows = []
             hourly_charging = [0.0] * lookahead_hours
 
+            # DEBUG: Log deficit analysis
+            logger.info(f"📊 Deficit Analysis:")
+            for i, deficit in enumerate(deficit_hours[:5]):  # First 5 deficits
+                logger.info(f"  Deficit {i+1}: hour={deficit['hour']}, SOC={deficit['soc']:.1f}%, needed={deficit['deficit_kwh']:.2f} kWh")
+
             for deficit in deficit_hours:
                 deficit_hour = deficit['hour']
                 needed_kwh = deficit['deficit_kwh']
@@ -435,10 +440,11 @@ class TibberOptimizer:
                 # Find available hours BEFORE this deficit
                 available_hours = []
                 for h in range(0, deficit_hour):
-                    if hourly_charging[h] == 0:
+                    if hourly_charging[h] < max_charge_power:  # Allow stacking up to max_charge_power
                         available_hours.append({
                             'hour': h,
-                            'price': hourly_prices[h]
+                            'price': hourly_prices[h],
+                            'current_load': hourly_charging[h]
                         })
 
                 # Sort by price (cheapest first)
@@ -451,19 +457,59 @@ class TibberOptimizer:
                         break
 
                     hour = slot['hour']
-                    charge_kwh = min(remaining_kwh, max_charge_power)
+                    current_load = slot['current_load']
+                    available_capacity = max_charge_power - current_load
 
-                    hourly_charging[hour] = charge_kwh
+                    if available_capacity <= 0:
+                        continue
+
+                    charge_kwh = min(remaining_kwh, available_capacity)
+
+                    # Add to existing charging (not replace)
+                    hourly_charging[hour] += charge_kwh
                     remaining_kwh -= charge_kwh
 
-                    charging_windows.append({
+                    # Only add window if we actually charged
+                    if charge_kwh > 0.1:
+                        charging_windows.append({
+                            'hour': hour,
+                            'charge_kwh': charge_kwh,
+                            'price': slot['price'],
+                            'reason': f'Deficit at hour {deficit_hour}'
+                        })
+
+            # Consolidate duplicate hours in charging_windows
+            consolidated_windows = {}
+            for window in charging_windows:
+                hour = window['hour']
+                if hour not in consolidated_windows:
+                    consolidated_windows[hour] = {
                         'hour': hour,
-                        'charge_kwh': charge_kwh,
-                        'price': slot['price'],
-                        'reason': f'Deficit at hour {deficit_hour}'
-                    })
+                        'charge_kwh': 0,
+                        'price': window['price'],
+                        'reasons': []
+                    }
+                consolidated_windows[hour]['charge_kwh'] += window['charge_kwh']
+                consolidated_windows[hour]['reasons'].append(window['reason'])
+
+            # Convert back to list
+            charging_windows = []
+            for hour in sorted(consolidated_windows.keys()):
+                window = consolidated_windows[hour]
+                charging_windows.append({
+                    'hour': hour,
+                    'charge_kwh': window['charge_kwh'],
+                    'price': window['price'],
+                    'reason': ', '.join(set(window['reasons']))  # Unique reasons
+                })
 
             logger.info(f"Planned {len(charging_windows)} charging windows, total {sum(hourly_charging):.2f} kWh")
+
+            # DEBUG: Log charging plan
+            if charging_windows:
+                logger.info(f"📊 Charging Plan:")
+                for window in charging_windows[:10]:  # First 10 windows
+                    logger.info(f"  Hour {window['hour']:2d}: {window['charge_kwh']:.2f} kWh @ {window['price']*100:.1f} Ct")
 
             # =================================================================
             # STEP 5: Calculate final SOC WITH charging
