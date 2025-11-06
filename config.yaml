@@ -1,5 +1,5 @@
 name: Kostal Battery Manager
-version: "1.2.0-beta.10"
+version: "1.2.0-beta.11"
 slug: kostal_battery_manager
 description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und 48h-Grafiken"
 url: "https://github.com/SvenSteuer/kostal-battery-manager"
@@ -81,6 +81,10 @@ options:
   enable_consumption_learning: true
   learning_period_days: 28  # 4 Wochen Lernzeitraum
   home_consumption_sensor: "sensor.home_energy_consumption"
+  # v1.2.0-beta.11: Grid sensors for calculated home consumption (Grid + PV)
+  grid_from_sensor: "sensor.ksem_active_power_from_grid"  # Import from grid (always positive)
+  grid_to_sensor: "sensor.ksem_active_power_to_grid"      # Export to grid (always positive)
+  pv_total_sensor: "sensor.ksem_sum_pv_power_inverter_dc" # Total PV power
   # ENTWEDER: Manuelles Lastprofil mit stündlichen Werten (0-23 Uhr)
   # Stündlicher Verbrauch in kW (Durchschnitt über die Stunde)
   # Wird schrittweise durch echte Messwerte überschrieben
@@ -179,6 +183,10 @@ schema:
   home_consumption_sensor: str?
   average_daily_consumption: float?
   default_hourly_consumption_fallback: float?
+  # v1.2.0-beta.11 - Dual grid sensors
+  grid_from_sensor: str?
+  grid_to_sensor: str?
+  pv_total_sensor: str?
 
   # v0.9.2 - Forecast.Solar Professional API
   enable_forecast_solar_api: bool

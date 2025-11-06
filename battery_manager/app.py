@@ -1285,39 +1285,68 @@ def api_consumption_import_ha():
                 'error': 'Home Assistant client not available'
             }), 400
 
-        # v1.2.0-beta.10: Use calculated consumption (Grid + PV) instead of single sensor
-        # This matches the automatic recording logic for consistency
-        grid_sensor = config.get('home_consumption_sensor')  # This is actually the grid sensor
+        # v1.2.0-beta.11: Support dual grid sensors (FROM/TO) or legacy single grid sensor
+        grid_from_sensor = config.get('grid_from_sensor')
+        grid_to_sensor = config.get('grid_to_sensor')
         pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
+        battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
 
-        if not grid_sensor:
-            return jsonify({
-                'success': False,
-                'error': 'home_consumption_sensor (grid sensor) not configured'
-            }), 400
+        # Validate configuration
+        if grid_from_sensor and grid_to_sensor:
+            # Dual grid sensor mode (Kostal KSEM with separate FROM/TO sensors)
+            add_log('INFO', '🔧 Using dual grid sensor mode (FROM/TO)')
 
-        if not pv_sensor:
-            return jsonify({
-                'success': False,
-                'error': 'pv_total_sensor not configured'
-            }), 400
+            if not pv_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'pv_total_sensor not configured'
+                }), 400
 
-        days = request.json.get('days', 28) if request.json else 28
+            days = request.json.get('days', 28) if request.json else 28
 
-        add_log('INFO', f'Starting HA import with calculated consumption (Grid + PV) for last {days} days...')
-        add_log('INFO', f'Grid sensor: {grid_sensor}, PV sensor: {pv_sensor}')
+            add_log('INFO', f'Starting HA import with calculated consumption (PV + GridFrom - GridTo + Battery) for last {days} days...')
+            add_log('INFO', f'GridFrom: {grid_from_sensor}, GridTo: {grid_to_sensor}, PV: {pv_sensor}' + (f', Battery: {battery_sensor}' if battery_sensor else ''))
 
-        # Clear all manually imported data before importing new data
-        deleted = consumption_learner.clear_all_manual_data()
-        add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
+            # Clear all manually imported data before importing new data
+            deleted = consumption_learner.clear_all_manual_data()
+            add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
 
-        # v1.2.0-beta.10: Use new calculated import method (Home = PV + Grid)
-        result = consumption_learner.import_calculated_consumption_from_ha(
-            ha_client, grid_sensor, pv_sensor, days
-        )
+            # v1.2.0-beta.11: Use new dual grid import method with battery support
+            result = consumption_learner.import_calculated_consumption_dual_grid(
+                ha_client, grid_from_sensor, grid_to_sensor, pv_sensor, battery_sensor, days
+            )
+        else:
+            # Legacy single grid sensor mode (signed values: positive=import, negative=export)
+            grid_sensor = config.get('home_consumption_sensor')
+
+            if not grid_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'Neither dual grid sensors (grid_from_sensor, grid_to_sensor) nor legacy home_consumption_sensor configured'
+                }), 400
+
+            if not pv_sensor:
+                return jsonify({
+                    'success': False,
+                    'error': 'pv_total_sensor not configured'
+                }), 400
+
+            days = request.json.get('days', 28) if request.json else 28
+
+            add_log('INFO', f'Starting HA import with calculated consumption (Grid + PV + Battery) for last {days} days...')
+            add_log('INFO', f'Grid sensor: {grid_sensor}, PV sensor: {pv_sensor}' + (f', Battery: {battery_sensor}' if battery_sensor else ''))
+
+            # Clear all manually imported data before importing new data
+            deleted = consumption_learner.clear_all_manual_data()
+            add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
+
+            # v1.2.0-beta.10: Use legacy calculated import method (Home = PV + Grid + Battery)
+            result = consumption_learner.import_calculated_consumption_from_ha(
+                ha_client, grid_sensor, pv_sensor, battery_sensor, days
+            )
 
         if result['success']:
-            add_log('INFO', f'✅ HA Import: {result["imported_hours"]} Stundenwerte aus Home Assistant importiert (berechnet aus Grid + PV)')
+            add_log('INFO', f'✅ HA Import: {result["imported_hours"]} Stundenwerte aus Home Assistant importiert')
             return jsonify(result)
         else:
             add_log('ERROR', f'❌ HA Import fehlgeschlagen: {result.get("error", "Unknown error")}')
@@ -1753,17 +1782,20 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
 
 def get_home_consumption_kwh(ha_client, config, timestamp):
     """
-    Calculate actual home consumption in kWh from grid sensor and PV sensor.
+    Calculate actual home consumption in kWh from grid, PV, and battery sensors.
 
-    Formula: Home Consumption = PV Production + Grid Power
+    Formula: Home Consumption = PV Production + Grid Power + Battery Power
     - Grid Power positive = import from grid
     - Grid Power negative = export to grid
     - PV Production always positive
+    - Battery Power positive = battery discharging (delivers to home)
+    - Battery Power negative = battery charging (takes from home)
 
     Example (30.10. 10:00):
     - Grid: -1.494 kWh (export/feed-in)
     - PV: 2.1 kWh (production)
-    - Home: 2.1 + (-1.494) = 0.606 kWh
+    - Battery: 0.5 kWh (discharging)
+    - Home: 2.1 + (-1.494) + 0.5 = 1.106 kWh
 
     Args:
         ha_client: Home Assistant API client
@@ -1785,13 +1817,22 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         # Get PV sensor (always positive)
         pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
 
+        # Get battery sensor (can be positive or negative)
+        battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
+
         # Calculate hourly averages
         grid_avg_w = calculate_hourly_average(ha_client, grid_sensor, timestamp, allow_negative=True)
         pv_avg_w = calculate_hourly_average(ha_client, pv_sensor, timestamp, allow_negative=False)
+        battery_avg_w = calculate_hourly_average(ha_client, battery_sensor, timestamp, allow_negative=True)
 
         if grid_avg_w is None or pv_avg_w is None:
             logger.warning(f"Missing data - Grid: {grid_avg_w}, PV: {pv_avg_w}")
             return None
+
+        # Battery is optional - if not available, assume 0
+        if battery_avg_w is None:
+            logger.debug(f"Battery sensor not available, assuming 0")
+            battery_avg_w = 0
 
         # Convert W to kWh if needed (values > 50 are likely Watt)
         if abs(grid_avg_w) > 50:
@@ -1804,11 +1845,17 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         else:
             pv_avg_kwh = pv_avg_w
 
-        # Calculate home consumption
-        # Home = PV + Grid (Grid negative means export)
-        home_consumption_kwh = pv_avg_kwh + grid_avg_kwh
+        if abs(battery_avg_w) > 50:
+            battery_avg_kwh = battery_avg_w / 1000
+        else:
+            battery_avg_kwh = battery_avg_w
 
-        logger.info(f"Home consumption calculated: PV={pv_avg_kwh:.3f} kWh + Grid={grid_avg_kwh:.3f} kWh = Home={home_consumption_kwh:.3f} kWh")
+        # Calculate home consumption
+        # Home = PV + Grid + Battery
+        # (Battery positive = discharging = adds to home consumption)
+        home_consumption_kwh = pv_avg_kwh + grid_avg_kwh + battery_avg_kwh
+
+        logger.info(f"Home consumption calculated: PV={pv_avg_kwh:.3f} kWh + Grid={grid_avg_kwh:.3f} kWh + Battery={battery_avg_kwh:.3f} kWh = Home={home_consumption_kwh:.3f} kWh")
 
         # Validate result
         if home_consumption_kwh < 0:
