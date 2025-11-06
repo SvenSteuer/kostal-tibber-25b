@@ -271,6 +271,225 @@ class TibberOptimizer:
 
         return charge_start
 
+    def plan_battery_schedule_rolling(self,
+                                       ha_client,
+                                       config,
+                                       current_soc: float,
+                                       prices: List[Dict],
+                                       lookahead_hours: int = 24) -> Dict:
+        """
+        Plans battery schedule using simple rolling window (v1.2.0 - REWRITE)
+
+        Simple 5-step approach:
+        1. Forecast consumption for next 24h (from NOW)
+        2. Forecast PV production for next 24h (from NOW)
+        3. Find deficit hours (where battery + PV don't cover consumption)
+        4. Find optimal charging times (cheapest hours BEFORE deficits)
+        5. Calculate final SOC trajectory
+
+        NO backward estimation, NO complex past/present/future logic.
+        Rolling window: Always X hours from NOW, not calendar days.
+
+        Args:
+            ha_client: Home Assistant client
+            config: Configuration dict
+            current_soc: Current battery SOC (%)
+            prices: List of Tibber prices (today + tomorrow)
+            lookahead_hours: How many hours to look ahead (default: 24)
+
+        Returns:
+            dict: {
+                'hourly_soc': List[float],  # SOC at start of each hour (0=now, 1=now+1h, ...)
+                'hourly_charging': List[float],  # Planned charging kWh per hour
+                'hourly_pv': List[float],  # PV forecast per hour
+                'hourly_consumption': List[float],  # Consumption forecast per hour
+                'hourly_prices': List[float],  # Prices per hour
+                'charging_windows': List[dict],  # Charging schedule details
+                'start_time': str,  # When this plan starts (ISO format)
+                'last_planned': str  # When this plan was created (ISO format)
+            }
+        """
+        if not self.consumption_learner:
+            logger.warning("No consumption learner available")
+            return None
+
+        try:
+            now = datetime.now().astimezone()
+            current_hour_in_day = now.hour
+
+            # Battery parameters
+            battery_capacity = config.get('battery_capacity', 10.6)  # kWh
+            min_soc = config.get('auto_safety_soc', 20)  # %
+            max_soc = config.get('auto_charge_below_soc', 95)  # %
+            max_charge_power = config.get('max_charge_power', 3900) / 1000  # kW → kWh/h
+
+            logger.info(f"Planning {lookahead_hours}h rolling schedule starting from {now.strftime('%H:%M')}, SOC={current_soc:.1f}%")
+
+            # =================================================================
+            # STEP 1 & 2: Forecast consumption and PV for next N hours
+            # =================================================================
+            hourly_consumption = []
+            hourly_pv = []
+            hourly_prices = []
+
+            # Get PV forecast (0-23 = today, 24-47 = tomorrow)
+            pv_forecast_48h = self.get_hourly_pv_forecast(ha_client, config, include_tomorrow=True)
+
+            for i in range(lookahead_hours):
+                # Calculate which calendar hour this represents
+                target_hour_in_day = (current_hour_in_day + i) % 24
+                target_day_offset = (current_hour_in_day + i) // 24  # 0=today, 1=tomorrow
+                target_date = now.date() + timedelta(days=target_day_offset)
+
+                # Hour index in the 48h PV array (0-47)
+                pv_hour_index = current_hour_in_day + i
+
+                # Consumption forecast
+                consumption = self.consumption_learner.get_average_consumption(
+                    target_hour_in_day,
+                    target_date=target_date
+                )
+                hourly_consumption.append(consumption)
+
+                # PV forecast
+                pv = pv_forecast_48h.get(pv_hour_index, 0.0) if pv_hour_index < 48 else 0.0
+                hourly_pv.append(pv)
+
+                # Price
+                price = 0.30  # Fallback
+                for p in prices:
+                    start_time = p.get('startsAt', '')
+                    if start_time:
+                        try:
+                            price_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                            target_dt = now + timedelta(hours=i)
+                            if price_dt.hour == target_dt.hour and price_dt.date() == target_dt.date():
+                                price = p.get('total', 0.30)
+                                break
+                        except:
+                            pass
+                hourly_prices.append(price)
+
+            logger.info(f"Forecasts ready: Avg consumption={sum(hourly_consumption)/len(hourly_consumption):.2f}kWh, "
+                       f"Avg PV={sum(hourly_pv)/len(hourly_pv):.2f}kWh, "
+                       f"Avg price={sum(hourly_prices)/len(hourly_prices)*100:.1f}Ct")
+
+            # =================================================================
+            # STEP 3: Simulate SOC WITHOUT charging to find deficits
+            # =================================================================
+            baseline_soc = [0.0] * lookahead_hours
+            baseline_soc[0] = current_soc
+
+            min_kwh = (min_soc / 100) * battery_capacity
+            max_kwh = (max_soc / 100) * battery_capacity
+            soc_kwh = (current_soc / 100) * battery_capacity
+
+            for hour in range(1, lookahead_hours):
+                # Energy from PREVIOUS hour
+                net_energy = hourly_pv[hour - 1] - hourly_consumption[hour - 1]
+                soc_kwh += net_energy
+                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+            # Find deficit hours (SOC below threshold)
+            deficit_hours = []
+            for hour in range(lookahead_hours):
+                if baseline_soc[hour] <= min_soc + 5:  # 5% buffer
+                    current_kwh = (baseline_soc[hour] / 100) * battery_capacity
+                    target_kwh = ((min_soc + 10) / 100) * battery_capacity
+                    deficit_kwh = max(0, target_kwh - current_kwh)
+
+                    deficit_hours.append({
+                        'hour': hour,
+                        'soc': baseline_soc[hour],
+                        'deficit_kwh': deficit_kwh
+                    })
+
+            logger.info(f"Found {len(deficit_hours)} deficit hours: {[d['hour'] for d in deficit_hours]}")
+            if deficit_hours:
+                logger.info(f"  First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%")
+
+            # =================================================================
+            # STEP 4: Find optimal charging times
+            # =================================================================
+            charging_windows = []
+            hourly_charging = [0.0] * lookahead_hours
+
+            for deficit in deficit_hours:
+                deficit_hour = deficit['hour']
+                needed_kwh = deficit['deficit_kwh']
+
+                if needed_kwh < 0.5:
+                    continue
+
+                # Find available hours BEFORE this deficit
+                available_hours = []
+                for h in range(0, deficit_hour):
+                    if hourly_charging[h] == 0:
+                        available_hours.append({
+                            'hour': h,
+                            'price': hourly_prices[h]
+                        })
+
+                # Sort by price (cheapest first)
+                available_hours.sort(key=lambda x: x['price'])
+
+                # Allocate charging to cheapest hours
+                remaining_kwh = needed_kwh
+                for slot in available_hours:
+                    if remaining_kwh <= 0:
+                        break
+
+                    hour = slot['hour']
+                    charge_kwh = min(remaining_kwh, max_charge_power)
+
+                    hourly_charging[hour] = charge_kwh
+                    remaining_kwh -= charge_kwh
+
+                    charging_windows.append({
+                        'hour': hour,
+                        'charge_kwh': charge_kwh,
+                        'price': slot['price'],
+                        'reason': f'Deficit at hour {deficit_hour}'
+                    })
+
+            logger.info(f"Planned {len(charging_windows)} charging windows, total {sum(hourly_charging):.2f} kWh")
+
+            # =================================================================
+            # STEP 5: Calculate final SOC WITH charging
+            # =================================================================
+            final_soc = [0.0] * lookahead_hours
+            final_soc[0] = current_soc
+            soc_kwh = (current_soc / 100) * battery_capacity
+
+            for hour in range(1, lookahead_hours):
+                # Energy from PREVIOUS hour (PV + charging - consumption)
+                net_energy = hourly_pv[hour - 1] + hourly_charging[hour - 1] - hourly_consumption[hour - 1]
+                soc_kwh += net_energy
+                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                final_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+            min_soc_reached = min(final_soc)
+            logger.info(f"✅ Rolling plan complete: Min SOC {min_soc_reached:.1f}%, "
+                       f"{len(charging_windows)} charge windows")
+
+            return {
+                'hourly_soc': final_soc,
+                'hourly_charging': hourly_charging,
+                'hourly_pv': hourly_pv,
+                'hourly_consumption': hourly_consumption,
+                'hourly_prices': hourly_prices,
+                'charging_windows': charging_windows,
+                'start_time': now.isoformat(),
+                'last_planned': now.isoformat(),
+                'min_soc_reached': min_soc_reached,
+                'total_charging_kwh': sum(hourly_charging)
+            }
+
+        except Exception as e:
+            logger.error(f"Error in rolling battery schedule: {e}", exc_info=True)
+            return None
+
     def plan_daily_battery_schedule(self,
                                     ha_client,
                                     config,
@@ -404,11 +623,18 @@ class TibberOptimizer:
             logger.info(f"🔵 DEBUG baseline_soc: current_hour={current_hour}, setting baseline_soc[{current_hour}]={current_soc:.1f}%")
 
             # Simulate FUTURE hours (current_hour+1 to 47) from current SOC
+            # Same logic as past hours: store SOC at START of hour, then add energy from that hour
             for hour in range(current_hour + 1, 48):
+                # First add energy from PREVIOUS hour to get to START of this hour
                 net_energy = hourly_pv[hour - 1] - hourly_consumption[hour - 1]
                 soc_kwh += net_energy
                 soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                # Store SOC at START of this hour
                 baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+                # Debug: Show critical hours
+                if hour in [9, 10, 11, 12, 15, 18, 21, 23]:
+                    logger.info(f"  📊 Hour {hour}: SOC={baseline_soc[hour]:.1f}%, PV={hourly_pv[hour-1]:.2f}kWh, Cons={hourly_consumption[hour-1]:.2f}kWh, Net={net_energy:.2f}kWh")
 
             # 3. Identify deficit hours (where SOC falls below minimum) - 48 hours
             deficit_hours = []
@@ -426,6 +652,13 @@ class TibberOptimizer:
                     })
 
             logger.info(f"Found {len(deficit_hours)} deficit hours: {[d['hour'] for d in deficit_hours]}")
+
+            # Debug: Show why we have deficits
+            if deficit_hours:
+                logger.info(f"📉 First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%, needs {deficit_hours[0]['deficit_kwh']:.2f} kWh")
+                if len(deficit_hours) > 1:
+                    logger.info(f"📉 Deficit hours today: {[d['hour'] for d in deficit_hours if d['hour'] < 24]}")
+                    logger.info(f"📉 Deficit hours tomorrow: {[d['hour'] for d in deficit_hours if d['hour'] >= 24]}")
 
             # 4. Plan charging windows (cheapest hours BEFORE deficits) - 48 hours
             charging_windows = []

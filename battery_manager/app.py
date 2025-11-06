@@ -872,61 +872,46 @@ def api_charging_status():
 
 @app.route('/api/battery_schedule')
 def api_battery_schedule():
-    """Get 48-hour battery schedule with SOC forecast and charging plan (v1.1.0 - extended to 2 days)"""
+    """Get rolling 24h battery schedule with SOC forecast and charging plan (v1.2.0 - rolling window)"""
     try:
-        # Get current SOC
-        current_soc = app_state['battery']['soc']
-
-        # Get Tibber prices for today + tomorrow
-        prices = []
-        if ha_client:
-            tibber_sensor = config.get('tibber_price_sensor', 'sensor.tibber_prices')
-            attrs = ha_client.get_attributes(tibber_sensor)
-            if attrs:
-                # Combine today and tomorrow prices
-                today_prices = attrs.get('today', [])
-                tomorrow_prices = attrs.get('tomorrow', [])
-                prices = today_prices + tomorrow_prices
-                logger.info(f"Loaded {len(today_prices)} today prices + {len(tomorrow_prices)} tomorrow prices = {len(prices)} total")
-
-        # Generate 48-hour plan
-        plan = tibber_optimizer.plan_daily_battery_schedule(
-            ha_client=ha_client,
-            config=config,
-            current_soc=current_soc,
-            prices=prices
-        )
+        # Return the already calculated rolling schedule
+        plan = app_state.get('daily_battery_schedule')
 
         if plan:
-            # Debug: Log first few SOC values being sent to frontend
+            # Debug: Log SOC values
             soc_values = plan.get('hourly_soc', [])
-            if len(soc_values) >= 24:
-                logger.info(f"📊 API returning SOC values: hour 0={soc_values[0]:.1f}%, "
-                          f"hour 12={soc_values[12]:.1f}%, hour 23={soc_values[23]:.1f}%")
+            if len(soc_values) >= 12:
+                logger.debug(f"📊 API returning rolling SOC: now={soc_values[0]:.1f}%, "
+                          f"+6h={soc_values[6]:.1f}%, +12h={soc_values[12]:.1f}%")
             return jsonify(plan)
         else:
+            # Fallback: return empty 24h schedule
+            current_soc = app_state['battery']['soc']
             return jsonify({
-                'error': 'Could not generate battery schedule',
-                'hourly_soc': [current_soc] * 48,
-                'hourly_charging': [0] * 48,
-                'hourly_pv': [0] * 48,
-                'hourly_consumption': [0] * 48,
-                'hourly_prices': [0] * 48,
+                'error': 'No rolling schedule available yet',
+                'hourly_soc': [current_soc] * 24,
+                'hourly_charging': [0] * 24,
+                'hourly_pv': [0] * 24,
+                'hourly_consumption': [0] * 24,
+                'hourly_prices': [0.30] * 24,
                 'charging_windows': [],
-                'last_planned': None
-            }), 500
+                'last_planned': None,
+                'start_time': None
+            }), 200
 
     except Exception as e:
         logger.error(f"Error getting battery schedule: {e}", exc_info=True)
+        current_soc = app_state['battery'].get('soc', 50)
         return jsonify({
             'error': str(e),
-            'hourly_soc': [0] * 48,
-            'hourly_charging': [0] * 48,
-            'hourly_pv': [0] * 48,
-            'hourly_consumption': [0] * 48,
-            'hourly_prices': [0] * 48,
+            'hourly_soc': [current_soc] * 24,
+            'hourly_charging': [0] * 24,
+            'hourly_pv': [0] * 24,
+            'hourly_consumption': [0] * 24,
+            'hourly_prices': [0.30] * 24,
             'charging_windows': [],
-            'last_planned': None
+            'last_planned': None,
+            'start_time': None
         }), 500
 
 @app.route('/api/adjust_power', methods=['POST'])
@@ -1832,10 +1817,10 @@ def controller_loop():
     # v0.3.1 - Calculate charging plan immediately on startup
     update_charging_plan()
 
-    # v1.1.1 - Also calculate 48h battery schedule on startup
+    # v1.2.0 - Calculate initial rolling battery schedule on startup
     if ha_client and tibber_optimizer and consumption_learner:
         try:
-            logger.info("Calculating initial 48h battery schedule...")
+            logger.info("Calculating initial 24h rolling battery schedule...")
             soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
             soc_value = ha_client.get_state(soc_sensor)
             current_soc = float(soc_value) if soc_value and soc_value != 'unavailable' else app_state['battery'].get('soc', 50)
@@ -1849,23 +1834,24 @@ def controller_loop():
                 tomorrow_prices = attrs.get('tomorrow', [])
                 prices = today_prices + tomorrow_prices
 
-            # Generate initial 48h schedule
-            schedule = tibber_optimizer.plan_daily_battery_schedule(
+            # Generate initial rolling schedule (24h from now)
+            schedule = tibber_optimizer.plan_battery_schedule_rolling(
                 ha_client=ha_client,
                 config=config,
                 current_soc=current_soc,
-                prices=prices
+                prices=prices,
+                lookahead_hours=24
             )
 
             if schedule:
                 app_state['daily_battery_schedule'] = schedule
-                logger.info(f"✓ Initial 48h schedule calculated: "
+                logger.info(f"✓ Initial rolling schedule calculated: "
                           f"{len(schedule.get('charging_windows', []))} charging windows, "
                           f"min SOC {schedule.get('min_soc_reached', 0):.1f}%")
             else:
-                logger.warning("Failed to generate initial 48h battery schedule")
+                logger.warning("Failed to generate initial rolling battery schedule")
         except Exception as e:
-            logger.error(f"Error calculating initial 48h schedule: {e}", exc_info=True)
+            logger.error(f"Error calculating initial rolling schedule: {e}", exc_info=True)
 
     last_plan_update = datetime.now()
 
@@ -1907,21 +1893,22 @@ def controller_loop():
                             tomorrow_prices = attrs.get('tomorrow', [])
                             prices = today_prices + tomorrow_prices
 
-                        # Generate 48-hour schedule
-                        schedule = tibber_optimizer.plan_daily_battery_schedule(
+                        # v1.2.0 - Generate rolling 24h schedule
+                        schedule = tibber_optimizer.plan_battery_schedule_rolling(
                             ha_client=ha_client,
                             config=config,
                             current_soc=current_soc,
-                            prices=prices
+                            prices=prices,
+                            lookahead_hours=24
                         )
 
                         if schedule:
                             app_state['daily_battery_schedule'] = schedule
-                            logger.info(f"✓ Daily battery schedule updated: "
+                            logger.info(f"✓ Rolling battery schedule updated: "
                                       f"{len(schedule.get('charging_windows', []))} charging windows, "
                                       f"min SOC {schedule.get('min_soc_reached', 0):.1f}%")
                         else:
-                            logger.warning("Failed to generate daily battery schedule")
+                            logger.warning("Failed to generate rolling battery schedule")
 
                     except Exception as e:
                         logger.error(f"Error updating daily battery schedule: {e}", exc_info=True)
@@ -1979,40 +1966,36 @@ def controller_loop():
                             should_charge = False
                             reason = f"Battery full ({current_soc:.1f}% >= {max_soc}%)"
 
-                        # Use daily schedule if available
+                        # v1.2.0: Use rolling schedule if available
                         elif app_state['daily_battery_schedule']:
                             schedule = app_state['daily_battery_schedule']
-                            current_hour = now.hour  # 0-23 for today
 
-                            # v1.1.0: In 48h schedule, hours 0-23 = today, 24-47 = tomorrow
-                            # We only check TODAY's hours (0-23) for immediate charging decisions
-
-                            # Check if current hour is in charging windows
+                            # Rolling window: hour 0 = now, hour 1 = now+1h, etc.
+                            # Check if hour 0 (current hour) is a charging window
                             charging_windows = schedule.get('charging_windows', [])
                             current_window = None
                             for window in charging_windows:
-                                # Only check TODAY's windows (hour 0-23)
-                                if window['hour'] < 24 and window['hour'] == current_hour:
+                                if window['hour'] == 0:  # Hour 0 = charge NOW
                                     current_window = window
                                     break
 
                             if current_window:
                                 should_charge = True
-                                reason = (f"Planned charging window: {current_window['charge_kwh']:.2f} kWh "
+                                reason = (f"Rolling schedule: {current_window['charge_kwh']:.2f} kWh "
                                         f"@ {current_window['price']*100:.2f} Cent/kWh "
                                         f"({current_window['reason']})")
-                                logger.info(f"🔌 CHARGING NOW: Hour {current_hour} - {reason}")
+                                logger.info(f"🔌 CHARGING NOW (rolling hour 0): {reason}")
                             else:
                                 should_charge = False
                                 min_soc_forecast = schedule.get('min_soc_reached', 100)
-                                reason = f"No charging needed - Schedule OK (min SOC: {min_soc_forecast:.1f}%)"
+                                reason = f"No charging needed - Rolling schedule OK (min SOC: {min_soc_forecast:.1f}%)"
 
-                                # Debug: Show which charging windows exist for today
-                                today_windows = [w for w in charging_windows if w['hour'] < 24]
-                                if today_windows:
-                                    logger.debug(f"⏸️ NOT charging at hour {current_hour}. Today's charging windows: {[w['hour'] for w in today_windows]}")
+                                # Debug: Show upcoming charging windows
+                                upcoming_windows = [w['hour'] for w in charging_windows if w['hour'] < 6]
+                                if upcoming_windows:
+                                    logger.debug(f"⏸️ NOT charging now. Upcoming windows in next 6h: {upcoming_windows}")
                                 else:
-                                    logger.debug(f"⏸️ NOT charging - no charging windows planned for today")
+                                    logger.debug(f"⏸️ NOT charging - no charging windows in next 6h")
 
                         else:
                             # No schedule available - don't charge
