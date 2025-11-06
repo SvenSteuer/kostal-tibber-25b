@@ -368,10 +368,13 @@ class TibberOptimizer:
             # For current + future hours: simulate forward from current SOC
             baseline_soc = [0.0] * 48
 
-            # Estimate SOC at midnight by back-calculating from current SOC
+            # v1.1.1: Estimate SOC for past hours (0 to current_hour-1)
+            # Simple approach: Assume SOC was similar to current level, adjust slightly for time of day
+            # This is just for visualization - past hours don't affect charging decisions
             soc_at_midnight_kwh = (current_soc / 100) * battery_capacity
+
+            # Try to back-calculate, but clamp aggressively to avoid unrealistic values
             for h in range(0, current_hour):
-                # Reverse: add consumption, subtract PV (going backwards in time)
                 soc_at_midnight_kwh -= (hourly_pv[h] - hourly_consumption[h])
 
             # Clamp to battery limits
@@ -379,7 +382,15 @@ class TibberOptimizer:
             min_kwh = (min_soc / 100) * battery_capacity
             soc_at_midnight_kwh = max(min_kwh, min(max_kwh, soc_at_midnight_kwh))
 
-            # Simulate PAST hours (0 to current_hour-1) from midnight
+            # If estimated midnight SOC is way off current SOC, use simpler estimate
+            # (Happens when there's been massive PV generation or grid charging)
+            estimated_midnight_pct = (soc_at_midnight_kwh / battery_capacity) * 100
+            if abs(estimated_midnight_pct - current_soc) > 50:
+                # Fallback: Assume gradual change from 70% at midnight to current SOC
+                logger.debug(f"Large SOC deviation detected (midnight est: {estimated_midnight_pct:.1f}%, current: {current_soc:.1f}%), using simpler estimate")
+                soc_at_midnight_kwh = (70 / 100) * battery_capacity  # Typical overnight value
+
+            # Simulate PAST hours (0 to current_hour-1) from midnight estimate
             soc_kwh = soc_at_midnight_kwh
             for hour in range(current_hour):
                 baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
@@ -464,10 +475,11 @@ class TibberOptimizer:
 
             # 4b. ECONOMIC OPTIMIZATION: Opportunistic charging at cheap prices (v1.0.9) - 48 hours
             # Only charge if economically beneficial AND battery won't be filled by PV anyway
+            # v1.1.1: Start from NEXT hour, not current hour (current hour is already partially over)
             economic_threshold = 1.10  # Minimum 10% cost saving required
             negative_price_threshold = 0.0  # Charge if price <= 0 (we get paid!)
 
-            for hour in range(current_hour, 48):
+            for hour in range(current_hour + 1, 48):
                 # Skip if already charging in this hour
                 if hourly_charging[hour] > 0:
                     continue
@@ -601,8 +613,14 @@ class TibberOptimizer:
             # Estimate SOC at midnight (for past hours visualization)
             soc_at_midnight_kwh = (current_soc / 100) * battery_capacity
             for h in range(0, current_hour):
-                soc_at_midnight_kwh -= (hourly_pv[h] - hourly_consumption[h])
+                soc_at_midnight_kwh -= (hourly_pv[h] + hourly_charging[h] - hourly_consumption[h])
             soc_at_midnight_kwh = max(min_kwh, min(max_kwh, soc_at_midnight_kwh))
+
+            # Sanity check: If estimated midnight SOC is way off, use simpler estimate
+            estimated_midnight_pct = (soc_at_midnight_kwh / battery_capacity) * 100
+            if abs(estimated_midnight_pct - current_soc) > 50:
+                logger.debug(f"Large SOC deviation in final_soc (midnight est: {estimated_midnight_pct:.1f}%, current: {current_soc:.1f}%), using simpler estimate")
+                soc_at_midnight_kwh = (70 / 100) * battery_capacity
 
             # Simulate PAST hours (0 to current_hour-1)
             soc_kwh = soc_at_midnight_kwh
