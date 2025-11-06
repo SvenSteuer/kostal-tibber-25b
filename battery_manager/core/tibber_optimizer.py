@@ -439,88 +439,54 @@ class TibberOptimizer:
                 logger.info(f"  First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%")
 
             # =================================================================
-            # STEP 4: Find optimal charging times
+            # STEP 4: Find optimal charging times (v1.2.0-beta.17: FULL POWER)
             # =================================================================
             charging_windows = []
             hourly_charging = [0.0] * lookahead_hours
 
-            # DEBUG: Log deficit analysis
-            logger.info(f"📊 Deficit Analysis:")
-            for i, deficit in enumerate(deficit_hours[:5]):  # First 5 deficits
-                logger.info(f"  Deficit {i+1}: hour={deficit['hour']}, SOC={deficit['soc']:.1f}%, needed={deficit['deficit_kwh']:.2f} kWh")
+            if deficit_hours:
+                # Calculate TOTAL energy needed to cover all deficits
+                total_deficit_kwh = sum(d['deficit_kwh'] for d in deficit_hours)
+                first_deficit_hour = deficit_hours[0]['hour']
 
-            for deficit in deficit_hours:
-                deficit_hour = deficit['hour']
-                needed_kwh = deficit['deficit_kwh']
+                logger.info(f"📊 Deficit Summary:")
+                logger.info(f"  Total deficits: {len(deficit_hours)} hours")
+                logger.info(f"  First deficit: hour {first_deficit_hour} (SOC={deficit_hours[0]['soc']:.1f}%)")
+                logger.info(f"  Total energy needed: {total_deficit_kwh:.2f} kWh")
 
-                if needed_kwh < 0.5:
-                    continue
-
-                # Find available hours BEFORE this deficit
+                # Find available hours BEFORE first deficit
                 available_hours = []
-                for h in range(0, deficit_hour):
-                    if hourly_charging[h] < max_charge_power:  # Allow stacking up to max_charge_power
-                        available_hours.append({
-                            'hour': h,
-                            'price': hourly_prices[h],
-                            'current_load': hourly_charging[h]
-                        })
+                for h in range(0, first_deficit_hour):
+                    available_hours.append({
+                        'hour': h,
+                        'price': hourly_prices[h]
+                    })
 
                 # Sort by price (cheapest first)
                 available_hours.sort(key=lambda x: x['price'])
 
-                # Allocate charging to cheapest hours
-                remaining_kwh = needed_kwh
+                # Allocate charging: ALWAYS use max_charge_power (full power charging)
+                remaining_kwh = total_deficit_kwh
                 for slot in available_hours:
                     if remaining_kwh <= 0:
                         break
 
                     hour = slot['hour']
-                    current_load = slot['current_load']
-                    available_capacity = max_charge_power - current_load
 
-                    if available_capacity <= 0:
-                        continue
+                    # Charge with FULL POWER (max_charge_power), not minimum
+                    charge_kwh = min(remaining_kwh, max_charge_power)
 
-                    charge_kwh = min(remaining_kwh, available_capacity)
-
-                    # Add to existing charging (not replace)
-                    hourly_charging[hour] += charge_kwh
+                    hourly_charging[hour] = charge_kwh
                     remaining_kwh -= charge_kwh
 
-                    # Only add window if we actually charged
-                    if charge_kwh > 0.1:
-                        charging_windows.append({
-                            'hour': hour,
-                            'charge_kwh': charge_kwh,
-                            'price': slot['price'],
-                            'reason': f'Deficit at hour {deficit_hour}'
-                        })
-
-            # Consolidate duplicate hours in charging_windows
-            consolidated_windows = {}
-            for window in charging_windows:
-                hour = window['hour']
-                if hour not in consolidated_windows:
-                    consolidated_windows[hour] = {
+                    charging_windows.append({
                         'hour': hour,
-                        'charge_kwh': 0,
-                        'price': window['price'],
-                        'reasons': []
-                    }
-                consolidated_windows[hour]['charge_kwh'] += window['charge_kwh']
-                consolidated_windows[hour]['reasons'].append(window['reason'])
+                        'charge_kwh': charge_kwh,
+                        'price': slot['price'],
+                        'reason': f'Cover {len(deficit_hours)} deficits starting at hour {first_deficit_hour}'
+                    })
 
-            # Convert back to list
-            charging_windows = []
-            for hour in sorted(consolidated_windows.keys()):
-                window = consolidated_windows[hour]
-                charging_windows.append({
-                    'hour': hour,
-                    'charge_kwh': window['charge_kwh'],
-                    'price': window['price'],
-                    'reason': ', '.join(set(window['reasons']))  # Unique reasons
-                })
+                logger.info(f"💡 Charging Strategy: {len(charging_windows)} windows with FULL POWER ({max_charge_power:.2f} kW)")
 
             logger.info(f"Planned {len(charging_windows)} charging windows, total {sum(hourly_charging):.2f} kWh")
 
