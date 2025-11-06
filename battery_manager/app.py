@@ -986,6 +986,123 @@ def get_historical_soc_interpolated(ha_client, soc_sensor: str, hours: int = 24)
         return None
 
 
+def get_historical_pv_hourly(ha_client, pv_sensor: str, hours: int = 24) -> List[float]:
+    """
+    Get historical PV production values for the last N hours (v1.2.0-beta.37)
+
+    Calculates hourly energy production in kWh by integrating power data from sensor.
+    For past hours: uses real historical data from Home Assistant
+    For future hours: will be filled from Forecast.Solar API
+
+    Args:
+        ha_client: Home Assistant client
+        pv_sensor: PV power sensor entity ID (e.g., 'sensor.ksem_sum_pv_power_inverter_dc')
+        hours: Number of hours to retrieve (default: 24)
+
+    Returns:
+        List[float]: PV energy production in kWh for each hour (24 values)
+                     Returns None if error or no data
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        now = datetime.now().astimezone()
+        start_time = now - timedelta(hours=hours)
+
+        # Fetch PV history
+        logger.info(f"Fetching historical PV from {pv_sensor} for last {hours} hours...")
+        history = ha_client.get_history(pv_sensor, start_time, now)
+
+        if not history or len(history) == 0:
+            logger.warning(f"No historical PV data available from {pv_sensor}")
+            return None
+
+        # Extract valid data points with timestamps
+        # Power sensor typically reports in W, we need to convert to kWh per hour
+        data_points = []  # List of (timestamp, power_w)
+        for entry in history:
+            try:
+                state = entry.get('state')
+                if state not in ['unknown', 'unavailable', None, '']:
+                    power_value = float(state)
+
+                    # Validate power range (0 to reasonable max, e.g., 20 kW)
+                    if not (0 <= power_value <= 20000):
+                        continue
+
+                    # Parse timestamp
+                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                    if timestamp_str:
+                        ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        data_points.append((ts, power_value))
+            except (ValueError, TypeError):
+                continue
+
+        if not data_points:
+            logger.warning(f"No valid PV data points found in history")
+            return None
+
+        # Sort by timestamp
+        data_points.sort(key=lambda x: x[0])
+
+        logger.info(f"Found {len(data_points)} PV data points, calculating hourly energy...")
+
+        # Calculate energy for each hour by integrating power over time
+        hourly_energy = []
+
+        for i in range(hours):
+            hour_start = start_time + timedelta(hours=i)
+            hour_end = hour_start + timedelta(hours=1)
+
+            # Round to hour boundaries
+            hour_start = hour_start.replace(minute=0, second=0, microsecond=0)
+            hour_end = hour_end.replace(minute=0, second=0, microsecond=0)
+
+            # Find all data points within this hour
+            hour_points = [(ts, power) for ts, power in data_points if hour_start <= ts < hour_end]
+
+            if not hour_points:
+                # No data for this hour - check if before or after sunrise
+                # Use 0 for now (nighttime), will improve with solar position later
+                hourly_energy.append(0.0)
+                continue
+
+            # Calculate energy by trapezoidal integration
+            # Energy (kWh) = integral of Power (W) over time, divided by 1000
+            total_energy_wh = 0.0
+
+            # Add boundary points for accurate integration
+            if hour_points[0][0] > hour_start:
+                # Extrapolate first point back to hour start (assume same power)
+                hour_points.insert(0, (hour_start, hour_points[0][1]))
+
+            if hour_points[-1][0] < hour_end:
+                # Extrapolate last point to hour end
+                hour_points.append((hour_end, hour_points[-1][1]))
+
+            # Trapezoidal rule: E = sum((P1 + P2)/2 * dt)
+            for j in range(len(hour_points) - 1):
+                t1, p1 = hour_points[j]
+                t2, p2 = hour_points[j + 1]
+                dt_seconds = (t2 - t1).total_seconds()
+                avg_power_w = (p1 + p2) / 2
+                energy_wh = avg_power_w * (dt_seconds / 3600)  # Wh = W * hours
+                total_energy_wh += energy_wh
+
+            # Convert Wh to kWh
+            energy_kwh = total_energy_wh / 1000
+            hourly_energy.append(round(energy_kwh, 2))
+
+        total_pv = sum(hourly_energy)
+        logger.info(f"✓ Historical PV calculated: {len(hourly_energy)} hourly values, total {total_pv:.2f} kWh")
+
+        return hourly_energy
+
+    except Exception as e:
+        logger.error(f"Error getting historical PV: {e}", exc_info=True)
+        return None
+
+
 @app.route('/api/battery_schedule')
 def api_battery_schedule():
     """Get 48h battery data: 24h historical + 24h forecast (v1.2.0-beta.14)"""
@@ -998,6 +1115,10 @@ def api_battery_schedule():
         # Get historical SOC data (last 24h) with interpolation
         soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
         historical_soc = get_historical_soc_interpolated(ha_client, soc_sensor, hours=24)
+
+        # Get historical PV data (last 24h) with hourly integration (v1.2.0-beta.37)
+        pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
+        historical_pv = get_historical_pv_hourly(ha_client, pv_sensor, hours=24)
 
         # Combine: 24h historical + 24h rolling forecast = 48h total
         if forecast_plan and historical_soc:
@@ -1019,7 +1140,13 @@ def api_battery_schedule():
             # Start with historical data for past 24h
             combined_soc = historical_soc.copy()  # Hour 0-23 (yesterday 20:00 to today 19:00)
             combined_charging = [0.0] * 24
-            combined_pv = [0.0] * 24
+
+            # Use historical PV if available, otherwise zeros (v1.2.0-beta.37)
+            if historical_pv and len(historical_pv) == 24:
+                combined_pv = historical_pv.copy()
+            else:
+                combined_pv = [0.0] * 24
+
             combined_consumption = [0.0] * 24
             combined_prices = [0.30] * 24
 
