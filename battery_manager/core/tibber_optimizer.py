@@ -370,7 +370,23 @@ class TibberOptimizer:
                             pass
                 hourly_prices.append(price)
 
-            logger.info(f"Forecasts ready: Avg consumption={sum(hourly_consumption)/len(hourly_consumption):.2f}kWh, "
+            # CRITICAL FIX: Convert cumulative PV to hourly deltas
+            # Forecast.Solar returns CUMULATIVE values (total since midnight)
+            # Consumption learner returns HOURLY values directly (no conversion needed)
+
+            # Convert PV cumulative → hourly
+            hourly_pv_fixed = []
+            for i in range(len(hourly_pv)):
+                if i == 0:
+                    hourly_pv_fixed.append(hourly_pv[0])  # First hour: use as-is
+                else:
+                    delta = hourly_pv[i] - hourly_pv[i-1]
+                    hourly_pv_fixed.append(max(0, delta))  # Can't be negative
+            hourly_pv = hourly_pv_fixed
+
+            # Consumption is already hourly - no conversion needed!
+
+            logger.info(f"Forecasts ready (PV converted to hourly): Avg consumption={sum(hourly_consumption)/len(hourly_consumption):.2f}kWh, "
                        f"Avg PV={sum(hourly_pv)/len(hourly_pv):.2f}kWh, "
                        f"Avg price={sum(hourly_prices)/len(hourly_prices)*100:.1f}Ct")
 
