@@ -999,23 +999,81 @@ def api_battery_schedule():
         soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
         historical_soc = get_historical_soc_interpolated(ha_client, soc_sensor, hours=24)
 
-        # Combine: 24h historical + 24h forecast = 48h total
+        # Combine: 24h historical + 24h rolling forecast = 48h total
         if forecast_plan and historical_soc:
-            combined_soc = historical_soc + forecast_plan.get('hourly_soc', [0] * 24)
-            combined_charging = [0] * 24 + forecast_plan.get('hourly_charging', [0] * 24)
-            combined_pv = [0] * 24 + forecast_plan.get('hourly_pv', [0] * 24)
-            combined_consumption = [0] * 24 + forecast_plan.get('hourly_consumption', [0] * 24)
-            combined_prices = [0.30] * 24 + forecast_plan.get('hourly_prices', [0.30] * 24)
+            # Parse start_time to determine current hour in the rolling window
+            start_time_str = forecast_plan.get('start_time')
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str)
+                current_hour_in_day = start_time.hour  # e.g., 20 for 20:09
+            else:
+                current_hour_in_day = datetime.now().hour
 
-            # Adjust charging windows hours (they are relative to forecast start, add 24h offset)
+            # Get rolling window data (24h from NOW)
+            forecast_soc = forecast_plan.get('hourly_soc', [])
+            forecast_charging = forecast_plan.get('hourly_charging', [])
+            forecast_pv = forecast_plan.get('hourly_pv', [])
+            forecast_consumption = forecast_plan.get('hourly_consumption', [])
+            forecast_prices = forecast_plan.get('hourly_prices', [])
+
+            # Start with historical data for past 24h
+            combined_soc = historical_soc.copy()  # Hour 0-23 (yesterday 20:00 to today 19:00)
+            combined_charging = [0.0] * 24
+            combined_pv = [0.0] * 24
+            combined_consumption = [0.0] * 24
+            combined_prices = [0.30] * 24
+
+            # Add forecast data for next 24h (aligned to calendar hours)
+            # Extend arrays to 48 hours
+            combined_soc.extend([combined_soc[-1] if combined_soc else 50.0] * 24)
+            combined_charging.extend([0.0] * 24)
+            combined_pv.extend([0.0] * 24)
+            combined_consumption.extend([0.0] * 24)
+            combined_prices.extend([0.30] * 24)
+
+            # Map rolling window hours to 48h array indices
+            # Rolling hour 0 = NOW (current_hour_in_day)
+            for rolling_hour in range(min(24, len(forecast_soc))):
+                # Calculate target hour in 48h array
+                # Current hour = 20 → we want to place it at index 20 (today) or 44 (tomorrow)
+                target_hour_in_day = (current_hour_in_day + rolling_hour) % 24
+                target_day_offset = (current_hour_in_day + rolling_hour) // 24  # 0=today, 1=tomorrow
+
+                # Historical data covers hours [0 to current_hour_in_day-1]
+                # We need to place forecast starting at current_hour_in_day
+                if target_day_offset == 0:
+                    # Today: place at index current_hour_in_day + rolling_hour
+                    target_index = current_hour_in_day + rolling_hour
+                else:
+                    # Tomorrow: place at index 24 + target_hour_in_day
+                    target_index = 24 + target_hour_in_day
+
+                if target_index < 48:
+                    combined_soc[target_index] = forecast_soc[rolling_hour]
+                    combined_charging[target_index] = forecast_charging[rolling_hour] if rolling_hour < len(forecast_charging) else 0.0
+                    combined_pv[target_index] = forecast_pv[rolling_hour] if rolling_hour < len(forecast_pv) else 0.0
+                    combined_consumption[target_index] = forecast_consumption[rolling_hour] if rolling_hour < len(forecast_consumption) else 0.0
+                    combined_prices[target_index] = forecast_prices[rolling_hour] if rolling_hour < len(forecast_prices) else 0.30
+
+            # Adjust charging window hours (relative to rolling window start)
             adjusted_windows = []
             for window in forecast_plan.get('charging_windows', []):
-                adjusted_window = window.copy()
-                adjusted_window['hour'] = window['hour'] + 24  # Shift to second half (forecast)
-                adjusted_windows.append(adjusted_window)
+                rolling_hour = window['hour']
+                target_hour_in_day = (current_hour_in_day + rolling_hour) % 24
+                target_day_offset = (current_hour_in_day + rolling_hour) // 24
+
+                if target_day_offset == 0:
+                    target_index = current_hour_in_day + rolling_hour
+                else:
+                    target_index = 24 + target_hour_in_day
+
+                if target_index < 48:
+                    adjusted_window = window.copy()
+                    adjusted_window['hour'] = target_index
+                    adjusted_windows.append(adjusted_window)
 
             return jsonify({
-                'hourly_soc': combined_soc[:48],  # Ensure exactly 48 values
+                'hourly_soc': combined_soc[:48],
                 'hourly_charging': combined_charging[:48],
                 'hourly_pv': combined_pv[:48],
                 'hourly_consumption': combined_consumption[:48],
