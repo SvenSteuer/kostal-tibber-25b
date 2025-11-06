@@ -431,7 +431,8 @@ class TibberOptimizer:
                     deficit_hours.append({
                         'hour': hour,
                         'soc': baseline_soc[hour],
-                        'deficit_kwh': deficit_kwh
+                        'deficit_kwh': deficit_kwh,
+                        'price': hourly_prices[hour]  # Add price for smart charging
                     })
 
             logger.info(f"Found {len(deficit_hours)} deficit hours: {[d['hour'] for d in deficit_hours]}")
