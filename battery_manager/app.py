@@ -171,6 +171,8 @@ def load_config():
         'pv_production_tomorrow_roof2': 'sensor.energy_production_tomorrow_roof2',
         'pv_next_hour_roof1': 'sensor.energy_next_hour_roof1',
         'pv_next_hour_roof2': 'sensor.energy_next_hour_roof2',
+        # v1.2.0-beta.8 - PV Total Power (DC side, sum of both strings)
+        'pv_total_sensor': 'sensor.ksem_sum_pv_power_inverter_dc',
         # v0.3.0 - Tibber Smart Charging
         'tibber_price_threshold_1h': 8,
         'tibber_price_threshold_3h': 8,
@@ -1078,44 +1080,21 @@ def api_consumption_forecast_chart():
         current_minute = now.minute
 
         # For current hour only: calculate live value with blending
+        # v1.2.0-beta.8: Use correct home consumption calculation
         current_hour_live_value = None
         if ha_client and current_minute < 59:
             try:
-                entity_id = config.get('home_consumption_sensor')
-                if entity_id:
-                    # Get history for current hour only
-                    hour_start = now.replace(minute=0, second=0, microsecond=0)
-                    history = ha_client.get_history(entity_id, hour_start, now)
+                # Calculate actual home consumption from grid + PV
+                hour_start = now.replace(minute=0, second=0, microsecond=0)
+                avg = get_home_consumption_kwh(ha_client, config, now)
 
-                    # Calculate average for current hour
-                    values = []
-                    for entry in history:
-                        try:
-                            state = entry.get('state')
-                            if state in ['unknown', 'unavailable', None]:
-                                continue
+                if avg is not None and avg >= 0:
+                    # Blend actual data with forecast for smoother display
+                    elapsed_fraction = current_minute / 60.0
+                    remaining_fraction = (60 - current_minute) / 60.0
+                    forecast_value = profile_today.get(current_hour, avg)
 
-                            value = float(state)
-                            if value < 0 or value > 50000:
-                                continue
-
-                            # Convert W to kW
-                            if value > 50:
-                                value = value / 1000
-
-                            values.append(value)
-                        except:
-                            continue
-
-                    if values:
-                        avg = sum(values) / len(values)
-
-                        # Blend actual data with forecast for smoother display
-                        elapsed_fraction = current_minute / 60.0
-                        remaining_fraction = (60 - current_minute) / 60.0
-                        forecast_value = profile_today.get(current_hour, avg)
-
-                        current_hour_live_value = (avg * elapsed_fraction) + (forecast_value * remaining_fraction)
+                    current_hour_live_value = (avg * elapsed_fraction) + (forecast_value * remaining_fraction)
             except Exception as e:
                 logger.error(f"Error calculating current hour consumption: {e}")
 
@@ -1701,8 +1680,142 @@ def get_charging_status_explanation():
         }
 
 
+def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=False):
+    """
+    Calculate hourly average from 5-minute sensor values.
+
+    Args:
+        ha_client: Home Assistant API client
+        sensor_id: Sensor entity ID
+        timestamp: Current timestamp
+        allow_negative: If True, allows negative values (e.g., for grid feed-in)
+
+    Returns:
+        float: Average value in kWh, or None if error/unavailable
+    """
+    try:
+        from datetime import timedelta
+
+        # Calculate time range: from 1 hour ago to now
+        end_time = timestamp
+        start_time = timestamp - timedelta(hours=1)
+
+        # Fetch history
+        history = ha_client.get_history(sensor_id, start_time, end_time)
+        if not history or len(history) == 0:
+            logger.warning(f"No history data available for {sensor_id}")
+            return None
+
+        # Calculate average from all readings
+        valid_values = []
+        for entry in history:
+            try:
+                value_state = entry.get('state')
+                if value_state not in ['unknown', 'unavailable', None, '']:
+                    value = float(value_state)
+
+                    # Skip negative values only if not allowed
+                    if not allow_negative and value < 0:
+                        continue
+
+                    # Skip unrealistically high values
+                    if abs(value) > 1000000:  # > 1 MW seems like an error
+                        continue
+
+                    valid_values.append(value)
+            except (ValueError, TypeError):
+                continue
+
+        if not valid_values:
+            logger.warning(f"No valid values in history for {sensor_id}")
+            return None
+
+        # Calculate average
+        avg_value = sum(valid_values) / len(valid_values)
+
+        logger.debug(f"Calculated average from {len(valid_values)} samples for {sensor_id}: {avg_value:.3f}")
+        return avg_value
+
+    except Exception as e:
+        logger.error(f"Error calculating hourly average for {sensor_id}: {e}", exc_info=True)
+        return None
+
+
+def get_home_consumption_kwh(ha_client, config, timestamp):
+    """
+    Calculate actual home consumption in kWh from grid sensor and PV sensor.
+
+    Formula: Home Consumption = PV Production + Grid Power
+    - Grid Power positive = import from grid
+    - Grid Power negative = export to grid
+    - PV Production always positive
+
+    Example (30.10. 10:00):
+    - Grid: -1.494 kWh (export/feed-in)
+    - PV: 2.1 kWh (production)
+    - Home: 2.1 + (-1.494) = 0.606 kWh
+
+    Args:
+        ha_client: Home Assistant API client
+        config: Configuration dict
+        timestamp: Current timestamp
+
+    Returns:
+        float: Home consumption in kWh, or None if error/unavailable
+    """
+    try:
+        from datetime import timedelta
+
+        # Get grid sensor (can be negative for feed-in)
+        grid_sensor = config.get('home_consumption_sensor')
+        if not grid_sensor:
+            logger.error("home_consumption_sensor not configured")
+            return None
+
+        # Get PV sensor (always positive)
+        pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
+
+        # Calculate hourly averages
+        grid_avg_w = calculate_hourly_average(ha_client, grid_sensor, timestamp, allow_negative=True)
+        pv_avg_w = calculate_hourly_average(ha_client, pv_sensor, timestamp, allow_negative=False)
+
+        if grid_avg_w is None or pv_avg_w is None:
+            logger.warning(f"Missing data - Grid: {grid_avg_w}, PV: {pv_avg_w}")
+            return None
+
+        # Convert W to kWh if needed (values > 50 are likely Watt)
+        if abs(grid_avg_w) > 50:
+            grid_avg_kwh = grid_avg_w / 1000
+        else:
+            grid_avg_kwh = grid_avg_w
+
+        if pv_avg_w > 50:
+            pv_avg_kwh = pv_avg_w / 1000
+        else:
+            pv_avg_kwh = pv_avg_w
+
+        # Calculate home consumption
+        # Home = PV + Grid (Grid negative means export)
+        home_consumption_kwh = pv_avg_kwh + grid_avg_kwh
+
+        logger.info(f"Home consumption calculated: PV={pv_avg_kwh:.3f} kWh + Grid={grid_avg_kwh:.3f} kWh = Home={home_consumption_kwh:.3f} kWh")
+
+        # Validate result
+        if home_consumption_kwh < 0:
+            logger.warning(f"Negative home consumption {home_consumption_kwh:.3f} kWh - likely sensor error")
+            return None
+
+        return home_consumption_kwh
+
+    except Exception as e:
+        logger.error(f"Error calculating home consumption: {e}", exc_info=True)
+        return None
+
+
 def get_consumption_kwh(ha_client, consumption_sensor, timestamp):
     """
+    DEPRECATED: Use get_home_consumption_kwh() instead.
+
     Get consumption in kWh for recording, handling both power (W/kW) and energy (kWh) sensors.
 
     For power sensors (W/kW): Fetches last hour's history, calculates average, converts to kWh
@@ -1941,26 +2054,24 @@ def controller_loop():
 
                 last_plan_update = now
 
-            # Record consumption periodically (v0.4.0, improved in v0.7.13)
+            # Record consumption periodically (v0.4.0, improved in v1.2.0-beta.8)
             if (consumption_learner and ha_client and
                 config.get('enable_consumption_learning', True)):
                 if (last_consumption_recording is None or
                     (now - last_consumption_recording).total_seconds() > consumption_recording_interval):
                     try:
-                        consumption_sensor = config.get('home_consumption_sensor')
-                        if consumption_sensor:
-                            # Get consumption in kWh, handling W/kW/kWh sensors automatically
-                            consumption_kwh = get_consumption_kwh(ha_client, consumption_sensor, now)
+                        # v1.2.0-beta.8: Calculate actual home consumption from grid + PV sensors
+                        consumption_kwh = get_home_consumption_kwh(ha_client, config, now)
 
-                            if consumption_kwh is not None:
-                                # Warn user if negative value detected (Kostal Smart Meter bug)
-                                if consumption_kwh < 0:
-                                    add_log('WARNING', f'⚠️ Negativer Verbrauchswert vom Sensor: {consumption_kwh:.3f} kWh (Kostal Smart Meter Bug - Wert ignoriert)')
-                                else:
-                                    consumption_learner.record_consumption(now, consumption_kwh)
-                                    logger.info(f"✓ Recorded consumption: {consumption_kwh:.3f} kWh at {now.strftime('%H:%M')}")
+                        if consumption_kwh is not None:
+                            # Validate: negative values should not occur with correct calculation
+                            if consumption_kwh < 0:
+                                add_log('WARNING', f'⚠️ Negativer Hausverbrauch: {consumption_kwh:.3f} kWh (Sensorfehler - Wert ignoriert)')
+                            else:
+                                consumption_learner.record_consumption(now, consumption_kwh)
+                                logger.info(f"✓ Recorded consumption: {consumption_kwh:.3f} kWh at {now.strftime('%H:%M')}")
 
-                                last_consumption_recording = now
+                            last_consumption_recording = now
                     except Exception as e:
                         logger.error(f"Error recording consumption: {e}", exc_info=True)
 
