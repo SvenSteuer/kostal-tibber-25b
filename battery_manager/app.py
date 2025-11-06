@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 from datetime import datetime
+from typing import List
 from flask import Flask, render_template, jsonify, request, redirect, url_for, make_response
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -872,30 +873,188 @@ def api_charging_status():
             'planned_end': None
         }), 500
 
+def get_historical_soc_interpolated(ha_client, soc_sensor: str, hours: int = 24) -> List[float]:
+    """
+    Get historical SOC values for the last N hours with linear interpolation (v1.2.0-beta.14)
+
+    The SOC sensor typically has sparse data points (only when value changes).
+    This function interpolates between data points to get one value per hour.
+
+    Args:
+        ha_client: Home Assistant client
+        soc_sensor: SOC sensor entity ID (e.g., 'sensor.zwh8_8500_battery_soc')
+        hours: Number of hours to retrieve (default: 24)
+
+    Returns:
+        List[float]: SOC values for each hour (24 values from oldest to newest)
+                     Returns None if error or no data
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        now = datetime.now().astimezone()
+        start_time = now - timedelta(hours=hours)
+
+        # Fetch SOC history
+        logger.info(f"Fetching historical SOC from {soc_sensor} for last {hours} hours...")
+        history = ha_client.get_history(soc_sensor, start_time, now)
+
+        if not history or len(history) == 0:
+            logger.warning(f"No historical SOC data available from {soc_sensor}")
+            return None
+
+        # Extract valid data points with timestamps
+        data_points = []  # List of (timestamp, soc_value)
+        for entry in history:
+            try:
+                state = entry.get('state')
+                if state not in ['unknown', 'unavailable', None, '']:
+                    soc_value = float(state)
+
+                    # Validate SOC range
+                    if not (0 <= soc_value <= 100):
+                        continue
+
+                    # Parse timestamp
+                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                    if timestamp_str:
+                        ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        data_points.append((ts, soc_value))
+            except (ValueError, TypeError):
+                continue
+
+        if not data_points:
+            logger.warning(f"No valid SOC data points found in history")
+            return None
+
+        # Sort by timestamp
+        data_points.sort(key=lambda x: x[0])
+
+        logger.info(f"Found {len(data_points)} SOC data points, interpolating to {hours} hourly values...")
+        logger.debug(f"SOC range: {data_points[0][1]:.1f}% to {data_points[-1][1]:.1f}%")
+
+        # Create target timestamps for each hour (start of hour)
+        target_timestamps = []
+        for i in range(hours):
+            target_time = start_time + timedelta(hours=i)
+            # Round down to start of hour
+            target_time = target_time.replace(minute=0, second=0, microsecond=0)
+            target_timestamps.append(target_time)
+
+        # Interpolate SOC for each target hour
+        interpolated_soc = []
+
+        for target_ts in target_timestamps:
+            # Find the two nearest data points (before and after target)
+            before_point = None
+            after_point = None
+
+            for ts, soc in data_points:
+                if ts <= target_ts:
+                    before_point = (ts, soc)
+                if ts >= target_ts and after_point is None:
+                    after_point = (ts, soc)
+                    break
+
+            # Interpolate
+            if before_point and after_point and before_point[0] != after_point[0]:
+                # Linear interpolation between two points
+                t1, soc1 = before_point
+                t2, soc2 = after_point
+                time_diff = (t2 - t1).total_seconds()
+                time_to_target = (target_ts - t1).total_seconds()
+                ratio = time_to_target / time_diff
+                interpolated_value = soc1 + (soc2 - soc1) * ratio
+                interpolated_soc.append(round(interpolated_value, 2))
+            elif before_point:
+                # Use the before point (extrapolate)
+                interpolated_soc.append(before_point[1])
+            elif after_point:
+                # Use the after point (extrapolate)
+                interpolated_soc.append(after_point[1])
+            else:
+                # No data at all, use fallback
+                logger.warning(f"No SOC data for hour {target_ts}, using 50% as fallback")
+                interpolated_soc.append(50.0)
+
+        logger.info(f"✓ Historical SOC interpolated: {len(interpolated_soc)} hourly values from {interpolated_soc[0]:.1f}% to {interpolated_soc[-1]:.1f}%")
+
+        return interpolated_soc
+
+    except Exception as e:
+        logger.error(f"Error getting historical SOC: {e}", exc_info=True)
+        return None
+
+
 @app.route('/api/battery_schedule')
 def api_battery_schedule():
-    """Get rolling 24h battery schedule with SOC forecast and charging plan (v1.2.0 - rolling window)"""
+    """Get 48h battery data: 24h historical + 24h forecast (v1.2.0-beta.14)"""
     try:
-        # Return the already calculated rolling schedule
-        plan = app_state.get('daily_battery_schedule')
+        from datetime import datetime, timedelta
 
-        if plan:
-            # Debug: Log SOC values
-            soc_values = plan.get('hourly_soc', [])
-            if len(soc_values) >= 12:
-                logger.debug(f"📊 API returning rolling SOC: now={soc_values[0]:.1f}%, "
-                          f"+6h={soc_values[6]:.1f}%, +12h={soc_values[12]:.1f}%")
-            return jsonify(plan)
+        # Get forecast (next 24h)
+        forecast_plan = app_state.get('daily_battery_schedule')
+
+        # Get historical SOC data (last 24h) with interpolation
+        soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
+        historical_soc = get_historical_soc_interpolated(ha_client, soc_sensor, hours=24)
+
+        # Combine: 24h historical + 24h forecast = 48h total
+        if forecast_plan and historical_soc:
+            combined_soc = historical_soc + forecast_plan.get('hourly_soc', [0] * 24)
+            combined_charging = [0] * 24 + forecast_plan.get('hourly_charging', [0] * 24)
+            combined_pv = [0] * 24 + forecast_plan.get('hourly_pv', [0] * 24)
+            combined_consumption = [0] * 24 + forecast_plan.get('hourly_consumption', [0] * 24)
+            combined_prices = [0.30] * 24 + forecast_plan.get('hourly_prices', [0.30] * 24)
+
+            # Adjust charging windows hours (they are relative to forecast start, add 24h offset)
+            adjusted_windows = []
+            for window in forecast_plan.get('charging_windows', []):
+                adjusted_window = window.copy()
+                adjusted_window['hour'] = window['hour'] + 24  # Shift to second half (forecast)
+                adjusted_windows.append(adjusted_window)
+
+            return jsonify({
+                'hourly_soc': combined_soc[:48],  # Ensure exactly 48 values
+                'hourly_charging': combined_charging[:48],
+                'hourly_pv': combined_pv[:48],
+                'hourly_consumption': combined_consumption[:48],
+                'hourly_prices': combined_prices[:48],
+                'charging_windows': adjusted_windows,
+                'last_planned': forecast_plan.get('last_planned'),
+                'start_time': forecast_plan.get('start_time'),
+                'min_soc_reached': forecast_plan.get('min_soc_reached', 0),
+                'total_charging_kwh': forecast_plan.get('total_charging_kwh', 0)
+            })
+
+        # Fallback: only forecast available
+        elif forecast_plan:
+            forecast_soc = forecast_plan.get('hourly_soc', [])
+            current_soc = app_state['battery']['soc']
+            # Pad historical with current SOC
+            combined_soc = [current_soc] * 24 + forecast_soc
+
+            return jsonify({
+                'hourly_soc': combined_soc[:48],
+                'hourly_charging': [0] * 24 + forecast_plan.get('hourly_charging', [0] * 24),
+                'hourly_pv': [0] * 24 + forecast_plan.get('hourly_pv', [0] * 24),
+                'hourly_consumption': [0] * 24 + forecast_plan.get('hourly_consumption', [0] * 24),
+                'hourly_prices': [0.30] * 24 + forecast_plan.get('hourly_prices', [0.30] * 24),
+                'charging_windows': forecast_plan.get('charging_windows', []),
+                'last_planned': forecast_plan.get('last_planned'),
+                'start_time': forecast_plan.get('start_time')
+            }), 200
+
+        # No data at all
         else:
-            # Fallback: return empty 24h schedule
             current_soc = app_state['battery']['soc']
             return jsonify({
-                'error': 'No rolling schedule available yet',
-                'hourly_soc': [current_soc] * 24,
-                'hourly_charging': [0] * 24,
-                'hourly_pv': [0] * 24,
-                'hourly_consumption': [0] * 24,
-                'hourly_prices': [0.30] * 24,
+                'error': 'No schedule available yet',
+                'hourly_soc': [current_soc] * 48,
+                'hourly_charging': [0] * 48,
+                'hourly_pv': [0] * 48,
+                'hourly_consumption': [0] * 48,
+                'hourly_prices': [0.30] * 48,
                 'charging_windows': [],
                 'last_planned': None,
                 'start_time': None
@@ -906,11 +1065,11 @@ def api_battery_schedule():
         current_soc = app_state['battery'].get('soc', 50)
         return jsonify({
             'error': str(e),
-            'hourly_soc': [current_soc] * 24,
-            'hourly_charging': [0] * 24,
-            'hourly_pv': [0] * 24,
-            'hourly_consumption': [0] * 24,
-            'hourly_prices': [0.30] * 24,
+            'hourly_soc': [current_soc] * 48,
+            'hourly_charging': [0] * 48,
+            'hourly_pv': [0] * 48,
+            'hourly_consumption': [0] * 48,
+            'hourly_prices': [0.30] * 48,
             'charging_windows': [],
             'last_planned': None,
             'start_time': None
