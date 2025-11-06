@@ -319,8 +319,8 @@ class TibberOptimizer:
 
             # Battery parameters
             battery_capacity = config.get('battery_capacity', 10.6)  # kWh
-            min_soc = config.get('auto_safety_soc', 20)  # %
-            max_soc = config.get('auto_charge_below_soc', 95)  # %
+            min_soc = int(config.get('auto_safety_soc', 20))  # %
+            max_soc = int(config.get('auto_charge_below_soc', 95))  # %
             max_charge_power = config.get('max_charge_power', 3900) / 1000  # kW → kWh/h
 
             logger.info(f"Planning {lookahead_hours}h rolling schedule starting from {now.strftime('%H:%M')}, SOC={current_soc:.1f}%")
@@ -661,8 +661,8 @@ class TibberOptimizer:
 
             # Get battery parameters
             battery_capacity = config.get('battery_capacity', 10.6)  # kWh
-            min_soc = config.get('auto_safety_soc', 20)  # %
-            max_soc = config.get('auto_charge_below_soc', 95)  # %
+            min_soc = int(config.get('auto_safety_soc', 20))  # %
+            max_soc = int(config.get('auto_charge_below_soc', 95))  # %
             max_charge_power = config.get('max_charge_power', 3900) / 1000  # kW
 
             # 1. Collect hourly data for 48 hours (today + tomorrow)
