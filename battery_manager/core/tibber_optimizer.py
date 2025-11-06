@@ -504,37 +504,61 @@ class TibberOptimizer:
                     logger.info(f"🎯 Planning for Peak {peak_idx+1}: Hours {peak_start}-{peak_end}")
                     logger.info(f"   Peak prices: {peak_prices_list} Ct/kWh")
 
-                    # Calculate energy needed DURING this peak
-                    # Battery should cover: (Consumption - PV) during peak hours
-                    energy_needed_during_peak = 0
+                    # v1.2.0-beta.33: IMPROVED energy calculation
+                    # OLD: Only calculated energy during peak
+                    # NEW: Calculate energy from END of JIT window to END of peak
+                    #      This accounts for discharge BETWEEN charging and peak!
+
+                    # Step 1: Determine JIT window (we'll refine this later)
+                    search_start = 0
+                    if peak_idx > 0:
+                        search_start = peaks[peak_idx - 1][-1]['hour'] + 1
+
+                    temp_jit_window_size = 4
+                    temp_jit_start = max(search_start, peak_start - temp_jit_window_size)
+                    jit_end = peak_start - 1  # Last hour of JIT window
+
+                    # Step 2: Calculate SOC at END of JIT window (before charging)
+                    cumulative_energy = 0
+                    for h in range(0, jit_end + 1):
+                        net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
+                        cumulative_energy += net
+
+                    soc_at_jit_end_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                    soc_at_jit_end_kwh = max(min_kwh, min(max_kwh, soc_at_jit_end_kwh))
+                    soc_at_jit_end_pct = (soc_at_jit_end_kwh / battery_capacity) * 100
+
+                    # Step 3: Simulate from JIT end to AFTER peak end to find lowest point
+                    # This tells us how much energy we need
+                    lowest_soc_kwh = soc_at_jit_end_kwh
+                    sim_soc_kwh = soc_at_jit_end_kwh
+
+                    for h in range(jit_end + 1, peak_end + 2):  # Simulate through peak + 1 hour
+                        if h >= lookahead_hours:
+                            break
+                        net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
+                        sim_soc_kwh += net
+                        sim_soc_kwh = max(min_kwh, min(max_kwh, sim_soc_kwh))
+                        lowest_soc_kwh = min(lowest_soc_kwh, sim_soc_kwh)
+
+                    # Step 4: How much do we need to charge to keep SOC above min + buffer?
+                    target_lowest_kwh = ((min_soc + 15) / 100) * battery_capacity  # 15% buffer above min
+                    required_charge_kwh = max(0, target_lowest_kwh - lowest_soc_kwh)
+
+                    # Also ensure we can cover peak hours with decent SOC
+                    energy_during_peak = 0
                     for h in range(peak_start, peak_end + 1):
                         if h < lookahead_hours:
                             net_deficit = hourly_consumption[h] - hourly_pv[h]
                             if net_deficit > 0:
-                                energy_needed_during_peak += net_deficit
+                                energy_during_peak += net_deficit
 
-                    logger.info(f"   Energy needed during peak: {energy_needed_during_peak:.2f} kWh")
+                    # Use the larger of: what we need for lowest point OR energy during peak
+                    required_charge_kwh = max(required_charge_kwh, energy_during_peak * 1.2)  # 20% buffer
 
-                    # Calculate SOC at peak start WITHOUT charging (from current state + already planned charging)
-                    cumulative_energy = 0
-                    for h in range(0, peak_start):
-                        net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
-                        cumulative_energy += net
-
-                    projected_soc_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
-                    projected_soc_kwh = max(min_kwh, min(max_kwh, projected_soc_kwh))
-                    projected_soc_pct = (projected_soc_kwh / battery_capacity) * 100
-
-                    # Required SOC at peak start: enough to cover the peak
-                    # Target: projected_soc + energy_needed_during_peak (but cap at max_soc)
-                    required_soc_kwh = min(max_kwh, projected_soc_kwh + energy_needed_during_peak)
-                    required_soc_pct = (required_soc_kwh / battery_capacity) * 100
-
-                    # How much do we need to charge?
-                    required_charge_kwh = max(0, required_soc_kwh - projected_soc_kwh)
-
-                    logger.info(f"   Projected SOC at hour {peak_start}: {projected_soc_pct:.1f}%")
-                    logger.info(f"   Target SOC for peak: {required_soc_pct:.1f}% ({required_soc_kwh:.2f} kWh)")
+                    logger.info(f"   Energy during peak: {energy_during_peak:.2f} kWh")
+                    logger.info(f"   SOC at JIT-end (hour {jit_end}): {soc_at_jit_end_pct:.1f}%")
+                    logger.info(f"   Lowest SOC (JIT-end to peak-end): {(lowest_soc_kwh/battery_capacity)*100:.1f}%")
                     logger.info(f"   Charge needed: {required_charge_kwh:.2f} kWh")
 
                     if required_charge_kwh > 0.5:
