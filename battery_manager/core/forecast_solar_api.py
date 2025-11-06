@@ -120,6 +120,12 @@ class ForecastSolarAPI:
 
                     logger.info(f"Plane {i+1}: received {len(valid_entries)} time intervals")
 
+                    # CRITICAL: Forecast.Solar /watthours endpoint returns CUMULATIVE values
+                    # We need to convert each plane's cumulative values to hourly deltas first,
+                    # then combine the deltas from all planes
+
+                    # Step 1: Collect cumulative values for THIS plane, sorted by hour
+                    plane_cumulative = {}
                     for timestamp_str, wh_value in valid_entries.items():
                         try:
                             # Parse timestamp (format: "2025-11-05 14:00:00")
@@ -129,13 +135,31 @@ class ForecastSolarAPI:
                             if dt.date() == today:
                                 hour = dt.hour
                                 kwh = float(wh_value) / 1000.0  # Wh to kWh
-
-                                # Combine multiple planes
-                                hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + kwh
+                                plane_cumulative[hour] = kwh
 
                         except (ValueError, TypeError) as e:
                             logger.debug(f"Skipping entry {timestamp_str}: {e}")
                             continue
+
+                    # Step 2: Convert THIS plane's cumulative values to hourly deltas
+                    if plane_cumulative:
+                        sorted_hours = sorted(plane_cumulative.keys())
+                        logger.debug(f"Plane {i+1}: Converting cumulative to hourly deltas for hours {sorted_hours}")
+
+                        for idx, hour in enumerate(sorted_hours):
+                            if idx == 0:
+                                # First hour: use cumulative value as-is (production from midnight to this hour)
+                                hourly_delta = plane_cumulative[hour]
+                            else:
+                                # Subsequent hours: subtract previous cumulative from current
+                                prev_hour = sorted_hours[idx - 1]
+                                hourly_delta = plane_cumulative[hour] - plane_cumulative[prev_hour]
+                                hourly_delta = max(0.0, hourly_delta)  # Can't be negative
+
+                            # Step 3: Add this plane's hourly delta to the combined forecast
+                            hourly_forecast[hour] = hourly_forecast.get(hour, 0.0) + hourly_delta
+
+                        logger.debug(f"Plane {i+1}: Converted {len(plane_cumulative)} cumulative values to hourly deltas")
                 else:
                     logger.error(f"Plane {i+1}: No 'result' key in API response")
                     logger.error(f"Full response: {data}")
