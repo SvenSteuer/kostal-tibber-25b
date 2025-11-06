@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0-beta.10] - 2025-11-06
+
+### Fixed
+- **Import berechnet jetzt korrekt Hausverbrauch** - Import verwendet nun Grid + PV Sensoren
+  - Problem: Manueller Import verwendete nur einen Sensor (oft falscher Wert)
+  - Lösung: Neue Funktion `import_calculated_consumption_from_ha` berechnet Home = PV + Grid
+  - Konsistent mit automatischer Aufzeichnung seit v1.2.0-beta.8
+  - Tabelle und Diagramm zeigen jetzt identische, korrekte Werte nach Import
+
+### Technical
+- Added `ConsumptionLearner.import_calculated_consumption_from_ha()` function
+- Updated API endpoint `/api/consumption_import_ha` to use calculated import
+- Marked old `import_from_home_assistant()` as DEPRECATED
+
 ## [1.1.2] - 2025-11-06
 
 ### Fixed

@@ -303,9 +303,264 @@ class ConsumptionLearner:
                 'skipped_days': 0
             }
 
+    def import_calculated_consumption_from_ha(self, ha_client, grid_sensor: str, pv_sensor: str, days: int = 28) -> Dict:
+        """
+        Import calculated home consumption from Home Assistant history (v1.2.0-beta.10)
+
+        Calculates actual home consumption using formula: Home = PV + Grid
+        - Grid positive = import from grid
+        - Grid negative = export to grid
+        - PV always positive
+
+        This matches the automatic recording logic for consistency.
+
+        Args:
+            ha_client: HomeAssistantClient instance
+            grid_sensor: Grid power sensor (e.g., 'sensor.ksem_grid_power')
+            pv_sensor: PV total power sensor (e.g., 'sensor.ksem_sum_pv_power_inverter_dc')
+            days: Number of days to import (default 28)
+
+        Returns:
+            Dict with import results
+        """
+        try:
+            logger.info(f"Starting calculated consumption import from HA (Grid + PV), last {days} days...")
+            logger.info(f"Grid sensor: {grid_sensor}, PV sensor: {pv_sensor}")
+
+            # Calculate time range
+            end_time = datetime.now()
+            start_time = end_time - timedelta(days=days)
+            logger.info(f"Time range: {start_time.isoformat()} to {end_time.isoformat()}")
+
+            # Get history data for both sensors
+            logger.info("Fetching grid sensor history...")
+            grid_history = ha_client.get_history(grid_sensor, start_time, end_time)
+
+            logger.info("Fetching PV sensor history...")
+            pv_history = ha_client.get_history(pv_sensor, start_time, end_time)
+
+            if not grid_history or not pv_history:
+                error_msg = []
+                if not grid_history:
+                    error_msg.append(f"No history for grid sensor {grid_sensor}")
+                if not pv_history:
+                    error_msg.append(f"No history for PV sensor {pv_sensor}")
+                error_str = ", ".join(error_msg)
+                logger.error(error_str)
+                return {
+                    'success': False,
+                    'error': error_str,
+                    'imported_hours': 0,
+                    'imported_days': 0,
+                    'skipped_days': 0,
+                    'history_entries': 0
+                }
+
+            logger.info(f"Received {len(grid_history)} grid entries, {len(pv_history)} PV entries")
+
+            # Process grid sensor data
+            grid_hourly_data = {}  # Key: (date, hour), Value: list of values (W)
+
+            for entry in grid_history:
+                try:
+                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                    if not timestamp_str:
+                        continue
+
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    local_timestamp = timestamp.astimezone()
+
+                    state = entry.get('state')
+                    if state in ['unknown', 'unavailable', None]:
+                        continue
+
+                    try:
+                        value = float(state)
+                    except (ValueError, TypeError):
+                        continue
+
+                    # Grid can be negative (feed-in), so allow negative values
+                    # Skip unrealistically high values
+                    if abs(value) > 50000:  # > 50 kW
+                        continue
+
+                    # Convert W to kW if needed (values > 50 are likely W)
+                    if abs(value) > 50:
+                        value = value / 1000
+
+                    date_key = local_timestamp.date()
+                    hour_key = local_timestamp.hour
+                    key = (date_key, hour_key)
+
+                    if key not in grid_hourly_data:
+                        grid_hourly_data[key] = []
+                    grid_hourly_data[key].append(value)
+
+                except Exception as e:
+                    logger.debug(f"Skipping grid entry: {e}")
+                    continue
+
+            # Process PV sensor data
+            pv_hourly_data = {}  # Key: (date, hour), Value: list of values (W)
+
+            for entry in pv_history:
+                try:
+                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                    if not timestamp_str:
+                        continue
+
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    local_timestamp = timestamp.astimezone()
+
+                    state = entry.get('state')
+                    if state in ['unknown', 'unavailable', None]:
+                        continue
+
+                    try:
+                        value = float(state)
+                    except (ValueError, TypeError):
+                        continue
+
+                    # PV should not be negative
+                    if value < 0:
+                        continue
+
+                    # Skip unrealistically high values
+                    if value > 50000:  # > 50 kW
+                        continue
+
+                    # Convert W to kW if needed
+                    if value > 50:
+                        value = value / 1000
+
+                    date_key = local_timestamp.date()
+                    hour_key = local_timestamp.hour
+                    key = (date_key, hour_key)
+
+                    if key not in pv_hourly_data:
+                        pv_hourly_data[key] = []
+                    pv_hourly_data[key].append(value)
+
+                except Exception as e:
+                    logger.debug(f"Skipping PV entry: {e}")
+                    continue
+
+            logger.info(f"Processed {len(grid_hourly_data)} grid hour buckets, {len(pv_hourly_data)} PV hour buckets")
+
+            # Calculate home consumption: Home = PV + Grid
+            # We need both grid AND PV data for each hour
+            consumption_hourly_data = {}  # Key: (date, hour), Value: avg consumption in kWh
+
+            # Get all unique date/hour combinations
+            all_keys = set(grid_hourly_data.keys()) & set(pv_hourly_data.keys())
+
+            logger.info(f"Found {len(all_keys)} hours with both grid and PV data")
+
+            for key in all_keys:
+                grid_values = grid_hourly_data[key]
+                pv_values = pv_hourly_data[key]
+
+                # Calculate averages (in kW)
+                grid_avg_kw = sum(grid_values) / len(grid_values)
+                pv_avg_kw = sum(pv_values) / len(pv_values)
+
+                # Calculate home consumption: Home = PV + Grid (in kW)
+                # Grid negative means export, so Home = PV - abs(Grid)
+                # Grid positive means import, so Home = PV + Grid
+                home_avg_kw = pv_avg_kw + grid_avg_kw
+
+                # Validate result
+                if home_avg_kw < 0:
+                    logger.warning(f"Negative home consumption {home_avg_kw:.3f} kW at {key} - skipping (likely sensor error)")
+                    continue
+
+                # For 1 hour average in kW, energy is kW * 1h = kWh
+                # So we can directly use the kW value as kWh
+                consumption_hourly_data[key] = home_avg_kw
+
+            logger.info(f"Calculated {len(consumption_hourly_data)} valid consumption values")
+
+            # Group by day
+            daily_data_dict = {}  # Key: date, Value: dict with hours
+
+            for (date_key, hour_key), consumption_kwh in consumption_hourly_data.items():
+                if date_key not in daily_data_dict:
+                    daily_data_dict[date_key] = {}
+                daily_data_dict[date_key][hour_key] = consumption_kwh
+
+            logger.info(f"Found data for {len(daily_data_dict)} unique days")
+
+            # Convert to format for import_detailed_history
+            daily_data = []
+            skipped_days = 0
+            weekdays_de = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag']
+
+            for date_key in sorted(daily_data_dict.keys()):
+                hours_dict = daily_data_dict[date_key]
+
+                # Require at least 3 hours of data per day
+                if len(hours_dict) < 3:
+                    logger.warning(f"Skipping {date_key}: only {len(hours_dict)} hours of data (need >= 3)")
+                    skipped_days += 1
+                    continue
+
+                # Build 24-hour array (fill missing hours with average)
+                hours = []
+                for h in range(24):
+                    if h in hours_dict:
+                        hours.append(hours_dict[h])
+                    else:
+                        # Use average of available data for missing hours
+                        if hours_dict:
+                            hours.append(sum(hours_dict.values()) / len(hours_dict))
+                        else:
+                            hours.append(0)
+
+                # Get weekday
+                weekday_idx = date_key.weekday()
+                weekday = weekdays_de[weekday_idx]
+
+                daily_data.append({
+                    'date': date_key.isoformat(),
+                    'weekday': weekday,
+                    'hours': hours
+                })
+
+            if not daily_data:
+                logger.error(f"No complete days found. Checked {len(daily_data_dict)} days")
+                return {
+                    'success': False,
+                    'error': f'No complete days found in history data. Check if sensors {grid_sensor} and {pv_sensor} are logging correctly.',
+                    'imported_hours': 0,
+                    'imported_days': 0,
+                    'skipped_days': len(daily_data_dict),
+                    'history_entries': len(grid_history) + len(pv_history)
+                }
+
+            logger.info(f"Prepared {len(daily_data)} days for import (skipped {skipped_days} incomplete days)")
+
+            # Import the data
+            result = self.import_detailed_history(daily_data)
+            result['history_entries'] = len(grid_history) + len(pv_history)
+            result['imported_days'] = len(daily_data)
+            return result
+
+        except Exception as e:
+            logger.error(f"Error importing calculated consumption from HA: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'imported_hours': 0,
+                'imported_days': 0,
+                'skipped_days': 0
+            }
+
     def import_from_home_assistant(self, ha_client, entity_id: str, days: int = 28) -> Dict:
         """
         Import consumption data from Home Assistant history (v0.6.0)
+
+        DEPRECATED: Use import_calculated_consumption_from_ha() for accurate home consumption.
+        This function imports from a single sensor which may not represent true home consumption.
 
         Args:
             ha_client: HomeAssistantClient instance
