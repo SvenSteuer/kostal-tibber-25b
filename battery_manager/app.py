@@ -1373,23 +1373,21 @@ def api_consumption_data_get():
             # For each date, get all 24 hours
             for date_str in dates:
                 # Get all entries for this date (may have duplicates due to non-rounded timestamps)
+                # v1.2.0-beta.9: Match chart behavior - show NEWEST data (ORDER BY created_at DESC)
+                # This ensures table and chart are consistent after automatic imports
                 cursor = conn.execute("""
-                    SELECT hour, consumption_kwh, is_manual, created_at
+                    SELECT hour, consumption_kwh, created_at
                     FROM hourly_consumption
                     WHERE DATE(timestamp) = ?
-                    ORDER BY hour, is_manual ASC, created_at DESC
+                    ORDER BY hour, created_at DESC
                 """, (date_str,))
 
-                # Filter duplicates: prefer learned (is_manual=0) over imported (is_manual=1)
-                # and latest created_at as tiebreaker
+                # Take newest entry per hour (first in DESC order)
                 hours_data = {}
-                for hour, consumption, is_manual, created_at in cursor.fetchall():
+                for hour, consumption, created_at in cursor.fetchall():
                     if hour not in hours_data:
                         hours_data[hour] = consumption
-                    elif hour in hours_data:
-                        # Already have an entry - only replace if current is learned (is_manual=0)
-                        # The ORDER BY ensures learned entries come first
-                        pass  # Keep first entry (already optimal due to ORDER BY)
+                        # First entry is newest due to ORDER BY created_at DESC
 
                 # Build 24-hour array
                 hours = [hours_data.get(h, 0) for h in range(24)]
