@@ -2472,6 +2472,42 @@ def controller_loop():
                 logger.info(f"✓ Initial rolling schedule calculated: "
                           f"{len(schedule.get('charging_windows', []))} charging windows, "
                           f"min SOC {schedule.get('min_soc_reached', 0):.1f}%")
+
+                # v1.2.0-beta.22: Initialize inverter mode based on schedule
+                # Check if we should be charging NOW (hour 0 in rolling window)
+                if kostal_api and modbus_client and config.get('auto_optimization_enabled', True):
+                    try:
+                        charging_windows = schedule.get('charging_windows', [])
+                        should_charge_now = False
+                        charge_reason = ""
+
+                        for window in charging_windows:
+                            if window['hour'] == 0:  # Hour 0 = NOW
+                                should_charge_now = True
+                                charge_reason = (f"{window['charge_kwh']:.2f} kWh @ {window['price']*100:.2f} Ct/kWh "
+                                               f"({window['reason']})")
+                                break
+
+                        if should_charge_now:
+                            # Start charging immediately
+                            logger.info(f"🔌 STARTUP: Charging required NOW - activating external control")
+                            kostal_api.set_external_control(True)
+                            charge_power = -config['max_charge_power']
+                            modbus_client.write_battery_power(charge_power)
+                            app_state['inverter']['mode'] = 'auto_charging'
+                            app_state['inverter']['control_mode'] = 'external'
+                            add_log('INFO', f'Startup: Started charging - {charge_reason}')
+                        else:
+                            # No charging required - ensure internal mode
+                            logger.info(f"✅ STARTUP: No charging required - setting internal control mode")
+                            modbus_client.write_battery_power(0)
+                            kostal_api.set_external_control(False)
+                            app_state['inverter']['mode'] = 'automatic'
+                            app_state['inverter']['control_mode'] = 'internal'
+                            add_log('INFO', 'Startup: Set to internal mode (no charging planned)')
+
+                    except Exception as e:
+                        logger.error(f"Error initializing inverter mode at startup: {e}", exc_info=True)
             else:
                 logger.warning("Failed to generate initial rolling battery schedule")
         except Exception as e:
