@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.1.1] - 2025-11-05
+
+### Fixed
+- **Kritischer Ladefehler behoben** - Batterie lud zur falschen Zeit aufgrund 48h-Logik-Konflikt
+  - Problem: Ladelogik prüfte alle 48 Stunden (0-47) statt nur heute (0-23)
+  - Folge: Batterie konnte zu teuren Zeiten laden, wenn morgige günstige Stunde mit heutiger übereinstimmte
+  - Lösung: Ladeentscheidung prüft jetzt explizit nur `window['hour'] < 24`
+- **Veralteter Code entfernt** - Alte 24h-Fallback-Logik komplett entfernt
+  - Entfernt: `should_charge_now()` Methode (nicht mehr benötigt)
+  - System nutzt jetzt ausschließlich den 48h-Plan für Ladeentscheidungen
+- **Verbessertes Debug-Logging** - Zeigt jetzt warum geladen/nicht geladen wird
+
+### Changed
+- Charging-Logik nutzt nur noch `plan_daily_battery_schedule()` mit 48h-Fenstern
+- Keine Fallback-Methoden mehr - klare, konsistente Ladesteuerung
+
+## [1.1.0] - 2025-11-05
+
+### Added
+- **📊 48-Stunden Diagramme** - Alle Dashboard-Grafiken zeigen jetzt 2 Tage (heute + morgen)
+- **Erweiterte Tibber-Preisanzeige** - Zeigt Preise für heute und morgen
+  - Labels: "Heute HH:00" und "Morgen HH:00"
+  - Fehlende morgige Preise (vor 13 Uhr) werden als grau angezeigt
+- **48h Batterie-Prognose** - SOC-Verlauf und Ladeplanung über 2 Tage
+  - Verwendet aktuellen SOC als Ankerpunkt für präzise Prognose
+  - Vergangenheit wird rückwärts geschätzt, Zukunft vorwärts simuliert
+- **48h Verbrauchsprognose** - Prognostizierter Verbrauch für heute und morgen
+  - Berücksichtigt Wochentag-spezifische Profile
+
+### Fixed
+- **Kritischer SOC-Berechnungsfehler behoben** - Prognose ignorierte vorher den aktuellen SOC
+  - Problem: Simulation startete von Mitternacht, nutzte aber nicht den echten aktuellen SOC
+  - Lösung: Aktuelle Stunde verwendet jetzt den tatsächlichen SOC-Wert als Anker
+  - Beispiel: Um 23:33 mit 80% SOC zeigt die Grafik jetzt korrekt 80% an (vorher 30%)
+- **SOC-Initialisierung beim Start** - SOC wird jetzt vor erster Planung geladen
+- **Physik-Verletzung behoben** - Laden erhöht jetzt korrekt den SOC (vorher konnte SOC beim Laden fallen)
+
+### Changed
+- API-Endpunkt `/api/battery_schedule` erweitert auf 48h
+  - Lädt heute + morgen Tibber-Preise
+  - Liefert 48 Werte für SOC, Ladung, PV, Verbrauch
+- API-Endpunkt `/api/tibber_price_chart` erweitert auf 48h
+- API-Endpunkt `/api/consumption_forecast_chart` erweitert auf 48h
+- Batterie-Simulationslogik umgeschrieben für 48-Stunden-Zeitraum
+- Chart-Labels zeigen jetzt Tag + Uhrzeit (z.B. "Heute 14:00", "Morgen 06:00")
+
+### Technical
+- `plan_daily_battery_schedule()` simuliert jetzt 48 Stunden statt 24
+- `get_hourly_pv_forecast()` mit `include_tomorrow=True` Parameter
+- Stunden-Indexierung: 0-23 = heute, 24-47 = morgen
+- Alle Arrays erweitert von 24 auf 48 Elemente
+- SOC-Simulation nutzt aktuellen SOC als Referenzpunkt (hour=current_hour)
+- Verbesserte Fehlerbehandlung für fehlende SOC-Sensordaten
+
+### Why This Matters
+- **Bessere Planung** - Sehe den kompletten Lade- und Verbrauchsplan für 2 Tage
+- **Morgige Preise** - Plane optimal für günstige Stunden am nächsten Tag
+- **Realitätsnähe** - SOC-Prognose entspricht jetzt der Realität (nutzt aktuellen Wert)
+- **Vollständiger Überblick** - Alle drei Grafiken konsistent über 48 Stunden
+
 ## [0.6.4] - 2025-11-04
 
 ### Changed

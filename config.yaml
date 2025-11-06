@@ -1,7 +1,7 @@
 name: Kostal Battery Manager
-version: "1.0.10"
+version: "1.1.1"
 slug: kostal_battery_manager
-description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und Grafiken"
+description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und 48h-Grafiken"
 url: "https://github.com/SvenSteuer/kostal-battery-manager"
 arch:
   - aarch64
