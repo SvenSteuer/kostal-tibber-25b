@@ -415,8 +415,8 @@ class TibberOptimizer:
 
                 baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-                # Debug: Log first 5 hours in detail
-                if hour <= 5:
+                # Debug: Log all hours in detail
+                if hour < lookahead_hours:
                     logger.info(f"   Hour {hour}: SOC {soc_before_pct:.1f}% → {baseline_soc[hour]:.1f}% "
                               f"(PV={hourly_pv[hour-1]:.2f}, Cons={hourly_consumption[hour-1]:.2f}, Net={net_energy:+.2f} kWh)")
 
@@ -596,8 +596,8 @@ class TibberOptimizer:
 
                 final_soc[hour] = (soc_kwh / battery_capacity) * 100
 
-                # Debug: Log first 5 hours in detail
-                if hour <= 5:
+                # Debug: Log all hours in detail
+                if hour < lookahead_hours:
                     charge_str = f", Charge={hourly_charging[hour-1]:.2f}" if hourly_charging[hour-1] > 0 else ""
                     logger.info(f"   Hour {hour}: SOC {soc_before_pct:.1f}% → {final_soc[hour]:.1f}% "
                               f"(PV={hourly_pv[hour-1]:.2f}, Cons={hourly_consumption[hour-1]:.2f}{charge_str}, Net={net_energy:+.2f} kWh)")
