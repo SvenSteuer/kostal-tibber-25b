@@ -675,7 +675,31 @@ class ConsumptionLearner:
 
             result = cursor.fetchone()
             if result and result[0]:
-                return float(result[0])
+                avg_consumption = float(result[0])
+                # DEBUG: Log consumption values to diagnose high forecasts
+                if avg_consumption > 5.0:
+                    logger.warning(f"⚠️ High consumption forecast for hour {hour}: {avg_consumption:.2f} kWh "
+                                  f"(weekday_filter={weekday_filter})")
+                    # Show which rows contributed to this average
+                    if weekday_filter is not None:
+                        debug_cursor = conn.execute("""
+                            SELECT timestamp, consumption_kwh, is_manual
+                            FROM hourly_consumption
+                            WHERE hour = ? AND strftime('%w', timestamp) = ?
+                            ORDER BY timestamp DESC
+                            LIMIT 5
+                        """, (hour, weekday_filter))
+                    else:
+                        debug_cursor = conn.execute("""
+                            SELECT timestamp, consumption_kwh, is_manual
+                            FROM hourly_consumption
+                            WHERE hour = ?
+                            ORDER BY timestamp DESC
+                            LIMIT 5
+                        """, (hour,))
+                    rows = debug_cursor.fetchall()
+                    logger.warning(f"   Sample data (latest 5): {rows}")
+                return avg_consumption
 
             logger.warning(f"No data for hour {hour}, using default {self.default_fallback} kWh")
             return self.default_fallback
