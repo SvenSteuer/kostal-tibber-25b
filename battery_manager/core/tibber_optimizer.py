@@ -681,9 +681,10 @@ class TibberOptimizer:
                             price_ct = slot['price'] * 100
 
                             # Check if this hour has significant PV that makes charging unnecessary
-                            # Skip if PV > 3 kW and hour is close to peak (within 2h)
-                            if hourly_pv[hour] > 3.0 and abs(hour - peak_start) <= 2:
-                                logger.info(f"   ⏭️ Skip hour {hour}: High PV ({hourly_pv[hour]:.1f} kWh) near peak")
+                            # Skip if PV > 2.5 kW (saves expensive grid charging when sun provides power)
+                            # Extended to 4h before peak to catch midday PV hours
+                            if hourly_pv[hour] > 2.5 and abs(hour - peak_start) <= 4:
+                                logger.info(f"   ⏭️ Skip hour {hour}: High PV ({hourly_pv[hour]:.1f} kWh) - prefer morning hours")
                                 continue
 
                             # Skip expensive hours if we already charged > 60% of target
