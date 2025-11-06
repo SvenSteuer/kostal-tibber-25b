@@ -1974,114 +1974,167 @@ def update_charging_plan():
 
 
 def get_charging_status_explanation():
-    """Generate human-readable explanation of charging status (v0.3.6)"""
+    """Generate human-readable explanation of charging status (v1.2.0-beta.38 - Rolling Schedule)"""
     try:
+        from datetime import datetime, timedelta
+
         # Get current values
         current_soc = app_state['battery']['soc']
-        min_soc = int(config.get('auto_safety_soc', 20))
-        max_soc = int(config.get('auto_charge_below_soc', 95))
-        pv_threshold = config.get('auto_pv_threshold', 5.0)
+        min_soc = 10  # Battery minimum
+        max_soc = int(config.get('auto_charge_below_soc', 98))
 
-        # Get PV forecast
-        pv_remaining = 0
-        if ha_client:
-            for roof in ['roof1', 'roof2']:
-                sensor = config.get(f'pv_remaining_today_{roof}')
-                if sensor:
-                    remaining = ha_client.get_state(sensor)
-                    if remaining and remaining not in ['unknown', 'unavailable']:
-                        pv_remaining += float(remaining)
-
-        # Get planned times
-        planned_start = None
-        planned_end = None
-        target_soc = max_soc
-        if app_state['charging_plan'].get('planned_start'):
-            planned_start = datetime.fromisoformat(app_state['charging_plan']['planned_start'])
-            planned_end = datetime.fromisoformat(app_state['charging_plan']['planned_end'])
-            target_soc = app_state['charging_plan'].get('target_soc', max_soc)
+        # Get rolling schedule (new multi-peak logic)
+        schedule = app_state.get('daily_battery_schedule')
 
         now = datetime.now().astimezone()
 
-        # Check conditions (v0.3.7 - improved labels)
-        # ✅ = Normal/OK, ❌ = Problem/Action needed
-        conditions = {
-            'soc_safe': {
-                'fulfilled': current_soc >= min_soc,
-                'label': f'Sicherheits-SOC nicht unterschritten ({current_soc:.0f}% ≥ {min_soc}%)' if current_soc >= min_soc else f'Sicherheits-SOC unterschritten ({current_soc:.0f}% < {min_soc}%)',
-                'priority': 1
-            },
-            'below_charge_limit': {
-                'fulfilled': current_soc < max_soc,
-                'label': f'Lade-Limit nicht erreicht ({current_soc:.0f}% < {max_soc}%)' if current_soc < max_soc else f'Lade-Limit erreicht ({current_soc:.0f}% ≥ {max_soc}%)',
-                'priority': 2
-            },
-            'pv_sufficient': {
-                'fulfilled': pv_remaining > pv_threshold,
-                'label': f'PV-Ertrag ausreichend ({pv_remaining:.1f} kWh > {pv_threshold:.1f} kWh)' if pv_remaining > pv_threshold else f'PV-Ertrag unzureichend ({pv_remaining:.1f} kWh ≤ {pv_threshold:.1f} kWh)',
-                'priority': 3
-            },
-            'has_plan': {
-                'fulfilled': planned_start is not None,
-                'label': 'Ladeplan vorhanden' if planned_start else 'Kein Ladeplan berechnet',
-                'priority': 4
-            }
-        }
-
-        # Determine main explanation
-        explanation = ""
+        # Default response
+        explanation = "⏸️ Keine 24h-Simulation verfügbar. System startet..."
         will_charge = False
+        schedule_info = {}
 
-        if current_soc < min_soc:
-            # Safety charging
-            explanation = f"⚡ Der Speicher wird SOFORT geladen, weil der SOC ({current_soc:.0f}%) unter dem Sicherheitsminimum von {min_soc}% liegt."
-            will_charge = True
+        if schedule:
+            # Extract schedule information
+            charging_windows = schedule.get('charging_windows', [])
+            min_soc_reached = schedule.get('min_soc_reached', 0)
+            total_charging_kwh = schedule.get('total_charging_kwh', 0)
+            start_time_str = schedule.get('start_time')
 
-        elif current_soc >= max_soc:
-            # Already full
-            explanation = f"✅ Der Speicher wird nicht geladen, weil er bereits bei {current_soc:.0f}% liegt (Ziel: {max_soc}%)."
-            will_charge = False
-
-        elif pv_remaining > pv_threshold:
-            # Sufficient PV
-            explanation = f"☀️ Der Speicher wird nicht aus dem Netz geladen, weil der prognostizierte Solarertrag mit {pv_remaining:.1f} kWh über dem Schwellwert von {pv_threshold:.1f} kWh liegt."
-            will_charge = False
-
-        elif planned_start and now >= planned_start:
-            # Planned time reached
-            if planned_end:
-                explanation = f"🔋 Der Speicher wird geladen, sodass er bis {planned_end.strftime('%H:%M')} Uhr bei {target_soc}% ist."
+            # Parse start time to map rolling hours to real time
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str)
+                current_hour_offset = start_time.hour
             else:
-                explanation = f"🔋 Der Speicher wird jetzt geladen bis {target_soc}% erreicht sind."
-            will_charge = True
+                current_hour_offset = now.hour
 
-        elif planned_start and now < planned_start:
-            # Waiting for planned time
-            explanation = f"⏳ Der Speicher wird ab {planned_start.strftime('%H:%M')} Uhr geladen, sodass er bis {planned_end.strftime('%H:%M')} Uhr bei {target_soc}% ist."
-            will_charge = False
+            # Find next charging window
+            next_window = None
+            current_window = None
+
+            for window in charging_windows:
+                rolling_hour = window['hour']
+                # Convert rolling hour to real time
+                target_hour = (current_hour_offset + rolling_hour) % 24
+                target_day_offset = (current_hour_offset + rolling_hour) // 24
+
+                window_time = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+                if target_day_offset > 0:
+                    window_time += timedelta(days=1)
+
+                # Check if this is the current or next window
+                window_end = window_time + timedelta(hours=1)
+                if now >= window_time and now < window_end:
+                    current_window = {**window, 'time': window_time}
+                    break
+                elif window_time > now and next_window is None:
+                    next_window = {**window, 'time': window_time}
+
+            # Determine explanation based on current state
+            if current_soc < 15:
+                # Critical SOC
+                if current_window:
+                    explanation = f"🔋 Laden AKTIV! Aktuell {current_window['charge_kwh']:.1f} kWh @ {current_window['price']*100:.1f} Ct/kWh (SOC kritisch: {current_soc:.0f}%)"
+                    will_charge = True
+                elif next_window:
+                    time_until = (next_window['time'] - now).total_seconds() / 3600
+                    explanation = f"⚡ SOC kritisch ({current_soc:.0f}%)! Nächster Ladeblock in {time_until:.1f}h um {next_window['time'].strftime('%H:%M')} Uhr"
+                    will_charge = False
+                else:
+                    explanation = f"⚠️ SOC niedrig ({current_soc:.0f}%)! Kein Ladeblock geplant - Preise bleiben günstig"
+                    will_charge = False
+
+            elif current_window:
+                # Currently charging
+                explanation = f"🔋 Laden AKTIV! {current_window['charge_kwh']:.1f} kWh @ {current_window['price']*100:.1f} Ct/kWh für {current_window.get('reason', 'optimale Preise')}"
+                will_charge = True
+
+            elif next_window:
+                # Waiting for next window
+                time_until = (next_window['time'] - now).total_seconds() / 3600
+                if time_until < 1:
+                    explanation = f"⏳ Nächster Ladeblock in {int(time_until * 60)} Minuten um {next_window['time'].strftime('%H:%M')} Uhr ({next_window['charge_kwh']:.1f} kWh @ {next_window['price']*100:.1f} Ct)"
+                else:
+                    explanation = f"⏳ Nächster Ladeblock in {time_until:.1f}h um {next_window['time'].strftime('%H:%M')} Uhr ({next_window['charge_kwh']:.1f} kWh @ {next_window['price']*100:.1f} Ct)"
+                will_charge = False
+
+            elif current_soc >= max_soc - 2:
+                # Already full
+                explanation = f"✅ Batterie fast voll ({current_soc:.0f}%). Keine weitere Netz-Ladung nötig"
+                will_charge = False
+
+            elif len(charging_windows) == 0:
+                # No charging needed
+                explanation = f"☀️ Keine Netz-Ladung geplant. Preise bleiben günstig oder PV-Ertrag ausreichend (SOC: {current_soc:.0f}%)"
+                will_charge = False
+
+            else:
+                # Charging completed
+                explanation = f"✅ Alle geplanten Ladeblöcke abgeschlossen (SOC: {current_soc:.0f}%)"
+                will_charge = False
+
+            # Build schedule info (replaces old conditions)
+            schedule_info = {
+                'charging_blocks': {
+                    'fulfilled': len(charging_windows) > 0,
+                    'label': f'{len(charging_windows)} Ladeblöcke geplant ({total_charging_kwh:.1f} kWh)',
+                    'priority': 1,
+                    'value': f'{len(charging_windows)} Blöcke'
+                },
+                'min_soc_forecast': {
+                    'fulfilled': min_soc_reached >= 15,
+                    'label': f'Niedrigster SOC in 24h: {min_soc_reached:.0f}%',
+                    'priority': 2,
+                    'value': f'{min_soc_reached:.0f}%'
+                },
+                'total_cost': {
+                    'fulfilled': True,
+                    'label': f'Ø Ladepreis: {(sum([w["price"] for w in charging_windows]) / len(charging_windows) * 100) if charging_windows else 0:.1f} Ct/kWh',
+                    'priority': 3,
+                    'value': f'{(sum([w["price"] for w in charging_windows]) / len(charging_windows) * 100) if charging_windows else 0:.1f} Ct'
+                },
+                'next_window': {
+                    'fulfilled': next_window is not None or current_window is not None,
+                    'label': f'Nächster Block: {next_window["time"].strftime("%H:%M")} Uhr' if next_window else ('Laden läuft' if current_window else 'Kein Block'),
+                    'priority': 4,
+                    'value': next_window['time'].strftime('%H:%M') if next_window else ('Jetzt' if current_window else '-')
+                }
+            }
 
         else:
-            # No plan
-            explanation = f"⏸️ Der Speicher wird nicht geladen. Es wurde kein optimaler Ladezeitpunkt gefunden (Preise bleiben günstig)."
-            will_charge = False
+            # No schedule available yet
+            schedule_info = {
+                'status': {
+                    'fulfilled': False,
+                    'label': 'System berechnet initiale 24h-Simulation...',
+                    'priority': 1,
+                    'value': 'Initialisierung'
+                }
+            }
 
         return {
             'explanation': explanation,
             'will_charge': will_charge,
-            'conditions': conditions,
+            'conditions': schedule_info,
             'current_soc': current_soc,
             'target_soc': max_soc,
-            'pv_remaining': pv_remaining,
-            'planned_start': planned_start.strftime('%H:%M') if planned_start else None,
-            'planned_end': planned_end.strftime('%H:%M') if planned_end else None
+            'pv_remaining': 0,  # Deprecated but kept for compatibility
+            'planned_start': None,
+            'planned_end': None
         }
 
     except Exception as e:
-        logger.error(f"Error generating charging status explanation: {e}")
+        logger.error(f"Error generating charging status explanation: {e}", exc_info=True)
         return {
             'explanation': '❌ Fehler beim Ermitteln des Ladestatus',
             'will_charge': False,
-            'conditions': {},
+            'conditions': {
+                'error': {
+                    'fulfilled': False,
+                    'label': 'Fehler beim Laden der Daten',
+                    'priority': 1,
+                    'value': 'Fehler'
+                }
+            },
             'current_soc': 0,
             'target_soc': 0,
             'pv_remaining': 0,
