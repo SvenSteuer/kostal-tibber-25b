@@ -374,6 +374,12 @@ class TibberOptimizer:
                        f"Avg PV={sum(hourly_pv)/len(hourly_pv):.2f}kWh, "
                        f"Avg price={sum(hourly_prices)/len(hourly_prices)*100:.1f}Ct")
 
+            # DEBUG: Show first 12 hours in detail
+            logger.info("📊 First 12 hours forecast:")
+            for i in range(min(12, lookahead_hours)):
+                logger.info(f"  Hour {i:2d}: PV={hourly_pv[i]:6.2f}kWh, Cons={hourly_consumption[i]:6.2f}kWh, "
+                          f"Net={hourly_pv[i]-hourly_consumption[i]:+6.2f}kWh, Price={hourly_prices[i]*100:5.1f}Ct")
+
             # =================================================================
             # STEP 3: Simulate SOC WITHOUT charging to find deficits
             # =================================================================
