@@ -404,11 +404,18 @@ class TibberOptimizer:
             logger.info(f"🔵 DEBUG baseline_soc: current_hour={current_hour}, setting baseline_soc[{current_hour}]={current_soc:.1f}%")
 
             # Simulate FUTURE hours (current_hour+1 to 47) from current SOC
+            # Same logic as past hours: store SOC at START of hour, then add energy from that hour
             for hour in range(current_hour + 1, 48):
+                # First add energy from PREVIOUS hour to get to START of this hour
                 net_energy = hourly_pv[hour - 1] - hourly_consumption[hour - 1]
                 soc_kwh += net_energy
                 soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+                # Store SOC at START of this hour
                 baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+                # Debug: Show critical hours
+                if hour in [9, 10, 11, 12, 15, 18, 21, 23]:
+                    logger.info(f"  📊 Hour {hour}: SOC={baseline_soc[hour]:.1f}%, PV={hourly_pv[hour-1]:.2f}kWh, Cons={hourly_consumption[hour-1]:.2f}kWh, Net={net_energy:.2f}kWh")
 
             # 3. Identify deficit hours (where SOC falls below minimum) - 48 hours
             deficit_hours = []
@@ -426,6 +433,13 @@ class TibberOptimizer:
                     })
 
             logger.info(f"Found {len(deficit_hours)} deficit hours: {[d['hour'] for d in deficit_hours]}")
+
+            # Debug: Show why we have deficits
+            if deficit_hours:
+                logger.info(f"📉 First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%, needs {deficit_hours[0]['deficit_kwh']:.2f} kWh")
+                if len(deficit_hours) > 1:
+                    logger.info(f"📉 Deficit hours today: {[d['hour'] for d in deficit_hours if d['hour'] < 24]}")
+                    logger.info(f"📉 Deficit hours tomorrow: {[d['hour'] for d in deficit_hours if d['hour'] >= 24]}")
 
             # 4. Plan charging windows (cheapest hours BEFORE deficits) - 48 hours
             charging_windows = []
