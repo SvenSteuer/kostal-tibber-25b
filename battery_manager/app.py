@@ -1340,6 +1340,32 @@ def api_consumption_import_ha():
             'error': str(e)
         }), 500
 
+@app.route('/api/consumption_import/clear_manual', methods=['POST'])
+def api_clear_manual_data():
+    """Clear all manually imported consumption data (v1.2.0-beta.7)"""
+    try:
+        if not consumption_learner:
+            return jsonify({
+                'success': False,
+                'error': 'Consumption learning not enabled'
+            }), 400
+
+        deleted = consumption_learner.clear_all_manual_data()
+        add_log('INFO', f'🗑️ Gelöscht: {deleted} manuelle Datensätze')
+
+        return jsonify({
+            'success': True,
+            'deleted': deleted
+        })
+
+    except Exception as e:
+        logger.error(f"Error clearing manual data: {e}", exc_info=True)
+        add_log('ERROR', f'Fehler beim Löschen: {str(e)}')
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/consumption_data', methods=['GET'])
 def api_consumption_data_get():
     """Get all consumption data for editing (v0.4.0)"""
