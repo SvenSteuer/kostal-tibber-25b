@@ -445,14 +445,35 @@ class TibberOptimizer:
             hourly_charging = [0.0] * lookahead_hours
 
             if deficit_hours:
-                # Calculate TOTAL energy needed to cover all deficits
-                total_deficit_kwh = sum(d['deficit_kwh'] for d in deficit_hours)
                 first_deficit_hour = deficit_hours[0]['hour']
 
+                # Calculate TOTAL energy needed using cumulative balance (not simple sum!)
+                # Find the maximum cumulative deficit from current SOC
+                max_cumulative_deficit = 0
+                cumulative_energy = 0
+
+                for hour in range(first_deficit_hour, lookahead_hours):
+                    # Net energy for this hour (PV - consumption)
+                    net_energy = hourly_pv[hour] - hourly_consumption[hour]
+                    cumulative_energy += net_energy
+
+                    # SOC at this hour without charging
+                    soc_at_hour_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+
+                    # How much below min_soc + 10%?
+                    target_kwh = ((min_soc + 10) / 100) * battery_capacity
+                    deficit_at_hour = max(0, target_kwh - soc_at_hour_kwh)
+
+                    # Track the maximum deficit we need to cover
+                    max_cumulative_deficit = max(max_cumulative_deficit, deficit_at_hour)
+
+                total_deficit_kwh = max_cumulative_deficit
+
                 logger.info(f"📊 Deficit Summary:")
-                logger.info(f"  Total deficits: {len(deficit_hours)} hours")
+                logger.info(f"  Deficit hours: {len(deficit_hours)} (from hour {first_deficit_hour} onwards)")
                 logger.info(f"  First deficit: hour {first_deficit_hour} (SOC={deficit_hours[0]['soc']:.1f}%)")
-                logger.info(f"  Total energy needed: {total_deficit_kwh:.2f} kWh")
+                logger.info(f"  Lowest baseline SOC: {min(baseline_soc[first_deficit_hour:]):.1f}%")
+                logger.info(f"  Energy needed (cumulative): {total_deficit_kwh:.2f} kWh")
 
                 # SMART: Don't charge if SOC is already high - let it discharge naturally first
                 # Find when SOC drops below "ready to charge" threshold (max_soc - 10%)
@@ -470,6 +491,17 @@ class TibberOptimizer:
                     logger.info(f"⏳ Current SOC {current_soc:.1f}% > {charge_ready_threshold:.1f}%, "
                               f"waiting until hour {earliest_charge_hour} to start charging")
 
+                # Check if we have enough time to charge
+                import math
+                needed_hours = math.ceil(total_deficit_kwh / max_charge_power)
+                available_hours_count = first_deficit_hour - earliest_charge_hour
+
+                if available_hours_count < needed_hours:
+                    # Not enough time! Must start earlier
+                    earliest_charge_hour = max(0, first_deficit_hour - needed_hours)
+                    logger.warning(f"⚠️ Not enough time! Need {needed_hours}h, only {available_hours_count}h available. "
+                                 f"Starting from hour {earliest_charge_hour} instead")
+
                 # Find available hours BETWEEN earliest_charge_hour and first_deficit_hour
                 available_hours = []
                 for h in range(earliest_charge_hour, first_deficit_hour):
@@ -477,15 +509,6 @@ class TibberOptimizer:
                         'hour': h,
                         'price': hourly_prices[h]
                     })
-
-                if not available_hours:
-                    logger.warning(f"⚠️ No charging window available between hour {earliest_charge_hour} and deficit at {first_deficit_hour}")
-                    # Fallback: use all hours before deficit
-                    for h in range(0, first_deficit_hour):
-                        available_hours.append({
-                            'hour': h,
-                            'price': hourly_prices[h]
-                        })
 
                 # Sort by price (cheapest first)
                 available_hours.sort(key=lambda x: x['price'])
