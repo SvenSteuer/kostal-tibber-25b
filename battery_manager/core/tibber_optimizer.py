@@ -504,23 +504,37 @@ class TibberOptimizer:
                     logger.info(f"🎯 Planning for Peak {peak_idx+1}: Hours {peak_start}-{peak_end}")
                     logger.info(f"   Peak prices: {peak_prices_list} Ct/kWh")
 
-                    # v1.2.0-beta.34: ITERATIVE simulation
-                    # Problem in beta.33: Calculated SOC at JIT-end WITHOUT the charging we're planning!
-                    # Solution: Iteratively simulate JIT-start to peak-end WITH hypothetical charging,
-                    #           adjust charge amount until lowest SOC point is above target
+                    # v1.2.0-beta.34: ITERATIVE simulation with DYNAMIC JIT window
+                    # Problem in beta.34: JIT window too late - SOC already at min at JIT-start!
+                    # Solution: Find where SOC drops below target, start JIT there!
 
-                    # Step 1: Determine JIT window and search boundaries
+                    # Step 1: Find where SOC drops below target in baseline simulation
                     search_start = 0
                     if peak_idx > 0:
                         search_start = peaks[peak_idx - 1][-1]['hour'] + 1
 
-                    jit_window_size = 4
-                    jit_start = max(search_start, peak_start - jit_window_size)
+                    target_lowest_kwh = ((min_soc + 15) / 100) * battery_capacity
+
+                    # Find first hour where baseline SOC < target
+                    jit_start = None
+                    for h in range(search_start, peak_start):
+                        if h >= lookahead_hours:
+                            break
+                        baseline_soc_kwh = baseline_soc[h] / 100 * battery_capacity
+                        if baseline_soc_kwh < target_lowest_kwh:
+                            jit_start = h
+                            break
+
+                    # If no low point found, use default 4h window
+                    if jit_start is None:
+                        jit_start = max(search_start, peak_start - 4)
+
+                    # Ensure JIT window is large enough (at least 3h before peak)
+                    jit_start = min(jit_start, peak_start - 3)
+                    jit_start = max(search_start, jit_start)
                     jit_end = peak_start - 1
 
-                    logger.info(f"   ⏰ Just-in-Time window: Hours {jit_start}-{jit_end}")
-
-                    # Step 2: Calculate SOC at JIT-START (not end!)
+                    # Step 2: Calculate SOC at JIT-START
                     cumulative_energy = 0
                     for h in range(0, jit_start):
                         net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
@@ -528,6 +542,8 @@ class TibberOptimizer:
 
                     soc_at_jit_start_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
                     soc_at_jit_start_kwh = max(min_kwh, min(max_kwh, soc_at_jit_start_kwh))
+
+                    logger.info(f"   ⏰ Just-in-Time window: Hours {jit_start}-{jit_end} (SOC drops below target at hour {jit_start})")
 
                     # Step 3: Find available hours in JIT window
                     available_hours = []
@@ -558,8 +574,8 @@ class TibberOptimizer:
                     required_charge_kwh = energy_during_peak * 1.5
 
                     # Step 5: ITERATIVE SIMULATION to find optimal charge
-                    target_lowest_kwh = ((min_soc + 15) / 100) * battery_capacity
                     max_iterations = 5
+                    window_expanded = False
 
                     for iteration in range(max_iterations):
                         # Allocate charge in cheapest hours (temporary)
@@ -573,15 +589,6 @@ class TibberOptimizer:
                             charge_this_hour = min(remaining_kwh, max_charge_power)
                             temp_charge_allocation[hour] = charge_this_hour
                             remaining_kwh -= charge_this_hour
-
-                        # If not enough space in JIT window, expand
-                        if remaining_kwh > 0.1 and iteration == 0:
-                            for h in range(jit_start - 1, search_start - 1, -1):
-                                if h < 0 or remaining_kwh <= 0:
-                                    break
-                                if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
-                                    available_hours.append({'hour': h, 'price': hourly_prices[h]})
-                                    available_hours.sort(key=lambda x: x['price'])
 
                         # Simulate from JIT-start to peak-end WITH this charging plan
                         sim_soc_kwh = soc_at_jit_start_kwh
@@ -601,17 +608,52 @@ class TibberOptimizer:
 
                         logger.info(f"   🔄 Iteration {iteration+1}: Charge {required_charge_kwh:.2f} kWh → Lowest SOC {(lowest_soc_kwh/battery_capacity)*100:.1f}% at hour {lowest_soc_hour}")
 
+                        # Check if lowest point is AT JIT-start - window too late!
+                        if lowest_soc_hour == jit_start and lowest_soc_kwh <= min_kwh + 0.5 and not window_expanded:
+                            logger.info(f"   ⚠️ Lowest at JIT-start! Expanding window earlier...")
+                            # Expand window to include earlier hours
+                            for h in range(jit_start - 1, search_start - 1, -1):
+                                if h < 0:
+                                    break
+                                if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
+                                    available_hours.append({'hour': h, 'price': hourly_prices[h]})
+                                if len(available_hours) >= 10:  # Enough hours
+                                    break
+                            available_hours.sort(key=lambda x: x['price'])
+                            window_expanded = True
+                            # Recalculate JIT-start
+                            if available_hours:
+                                jit_start = min(h['hour'] for h in available_hours)
+                                # Recalculate SOC at new JIT-start
+                                cumulative_energy = 0
+                                for h in range(0, jit_start):
+                                    net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
+                                    cumulative_energy += net
+                                soc_at_jit_start_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                                soc_at_jit_start_kwh = max(min_kwh, min(max_kwh, soc_at_jit_start_kwh))
+                                logger.info(f"   ✅ Window expanded to hour {jit_start}, restarting iteration...")
+                            continue  # Restart iteration with expanded window
+
                         # Check if we reached target
                         if lowest_soc_kwh >= target_lowest_kwh - 0.1:  # 0.1 kWh tolerance
                             logger.info(f"   ✅ Target reached! Lowest {(lowest_soc_kwh/battery_capacity)*100:.1f}% >= target {(target_lowest_kwh/battery_capacity)*100:.1f}%")
                             break
+
+                        # If not enough hours available, expand window
+                        if remaining_kwh > 0.1 and iteration == 0:
+                            for h in range(jit_start - 1, search_start - 1, -1):
+                                if h < 0 or remaining_kwh <= 0:
+                                    break
+                                if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
+                                    available_hours.append({'hour': h, 'price': hourly_prices[h]})
+                                    available_hours.sort(key=lambda x: x['price'])
 
                         # Need more charge - add deficit + 10% buffer
                         deficit_kwh = target_lowest_kwh - lowest_soc_kwh
                         required_charge_kwh += deficit_kwh * 1.1
 
                         if iteration == max_iterations - 1:
-                            logger.warning(f"   ⚠️ Max iterations, lowest {(lowest_soc_kwh/battery_capacity)*100:.1f}% still below target")
+                            logger.warning(f"   ⚠️ Max iterations, using best effort: {required_charge_kwh:.2f} kWh")
 
                     # Step 6: Apply the final charging plan
                     if required_charge_kwh > 0.5 and available_hours:
@@ -622,10 +664,17 @@ class TibberOptimizer:
                         logger.info(f"   📊 Final plan: {required_charge_kwh:.2f} kWh in {math.ceil(required_charge_kwh / max_charge_power)}h @ {max_charge_power:.2f} kW")
 
                         for slot in available_hours:
-                            if remaining_kwh <= 0:
+                            if remaining_kwh <= 0.1:  # Small tolerance
                                 break
 
                             hour = slot['hour']
+
+                            # Check if this hour has significant PV that makes charging unnecessary
+                            # Skip if PV > 3 kW and hour is close to peak (within 2h)
+                            if hourly_pv[hour] > 3.0 and abs(hour - peak_start) <= 2:
+                                logger.info(f"   ⏭️ Skip hour {hour}: High PV ({hourly_pv[hour]:.1f} kWh) near peak")
+                                continue
+
                             charge_kwh = min(remaining_kwh, max_charge_power)
 
                             hourly_charging[hour] = charge_kwh
@@ -640,7 +689,7 @@ class TibberOptimizer:
 
                             logger.info(f"   ✓ Charge hour {hour}: {charge_kwh:.2f} kWh @ {slot['price']*100:.1f} Ct")
 
-                        if remaining_kwh > 0.1:
+                        if remaining_kwh > 0.5:
                             logger.warning(f"   ⚠️ Could not allocate all charge! Missing: {remaining_kwh:.2f} kWh")
                     else:
                         logger.info(f"   ✓ Sufficient SOC, no charging needed")
