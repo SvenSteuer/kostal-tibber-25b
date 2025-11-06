@@ -849,6 +849,18 @@ function updatePriceChart() {
                 priceChart.data.labels = data.labels;
                 priceChart.data.datasets[0].data = data.prices;
 
+                // Calculate dynamic Y-axis range (10% padding above/below)
+                const validPrices = data.prices.filter(p => p !== null && p !== undefined);
+                if (validPrices.length > 0) {
+                    const minPrice = Math.min(...validPrices);
+                    const maxPrice = Math.max(...validPrices);
+                    const range = maxPrice - minPrice;
+                    const padding = range * 0.1; // 10% padding
+
+                    priceChart.options.scales.y.min = Math.max(0, minPrice - padding);
+                    priceChart.options.scales.y.max = maxPrice + padding;
+                }
+
                 // Highlight current hour with different color (only for today, index 0-23)
                 const currentHour = data.current_hour;
                 priceChart.data.datasets[0].backgroundColor = data.labels.map((label, index) => {
