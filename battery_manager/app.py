@@ -1805,7 +1805,7 @@ def update_charging_plan():
         if charge_end:
             # Hole aktuellen SOC
             current_soc = app_state['battery']['soc']
-            max_soc = config.get('auto_charge_below_soc', 95)
+            max_soc = int(config.get('auto_charge_below_soc', 95))
 
             logger.info(f"Found optimal charge end time: {charge_end}, current SOC: {current_soc}%, target: {max_soc}%")
 
@@ -1851,8 +1851,8 @@ def get_charging_status_explanation():
     try:
         # Get current values
         current_soc = app_state['battery']['soc']
-        min_soc = config.get('auto_safety_soc', 20)
-        max_soc = config.get('auto_charge_below_soc', 95)
+        min_soc = int(config.get('auto_safety_soc', 20))
+        max_soc = int(config.get('auto_charge_below_soc', 95))
         pv_threshold = config.get('auto_pv_threshold', 5.0)
 
         # Get PV forecast
@@ -2665,8 +2665,8 @@ def controller_loop():
                         app_state['battery']['soc'] = current_soc
 
                         # v0.3.4 - Use existing parameters consistently
-                        min_soc = config.get('auto_safety_soc', 20)
-                        max_soc = config.get('auto_charge_below_soc', 95)
+                        min_soc = int(config.get('auto_safety_soc', 20))
+                        max_soc = int(config.get('auto_charge_below_soc', 95))
 
                         # v0.9.0 - Use daily battery schedule for charging decisions
                         should_charge = False
