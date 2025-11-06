@@ -440,126 +440,154 @@ class TibberOptimizer:
                 logger.info(f"  First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%")
 
             # =================================================================
-            # STEP 4: Find optimal charging times (v1.2.0-beta.17: Smart charging)
+            # STEP 4: Find optimal charging times (v1.2.0-beta.30: Economic charging)
             # =================================================================
             charging_windows = []
             hourly_charging = [0.0] * lookahead_hours
 
-            if deficit_hours:
-                first_deficit_hour = deficit_hours[0]['hour']
+            # NEW STRATEGY v1.2.0-beta.30:
+            # Goal: Maximize battery usage during EXPENSIVE hours to save money
+            # OLD: Only charge enough to stay above min_soc
+            # NEW: Charge battery FULL before expensive hours, use it during expensive hours
 
-                # Calculate TOTAL energy needed using cumulative balance (not simple sum!)
-                # Find the maximum cumulative deficit from current SOC
-                max_cumulative_deficit = 0
-                cumulative_energy = 0
+            # Step 1: Identify expensive hours (top 30% of prices OR >10% above average)
+            avg_price = sum(hourly_prices) / len(hourly_prices)
+            sorted_prices = sorted(hourly_prices)
+            top_30_index = int(len(sorted_prices) * 0.7)
+            price_threshold = max(avg_price * 1.1, sorted_prices[top_30_index])
 
-                for hour in range(first_deficit_hour, lookahead_hours):
-                    # Net energy for this hour (PV - consumption)
-                    net_energy = hourly_pv[hour] - hourly_consumption[hour]
-                    cumulative_energy += net_energy
-
-                    # SOC at this hour without charging
-                    soc_at_hour_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
-
-                    # How much below min_soc + 10%?
-                    target_kwh = ((min_soc + 10) / 100) * battery_capacity
-                    deficit_at_hour = max(0, target_kwh - soc_at_hour_kwh)
-
-                    # Track the maximum deficit we need to cover
-                    max_cumulative_deficit = max(max_cumulative_deficit, deficit_at_hour)
-
-                total_deficit_kwh = max_cumulative_deficit
-
-                logger.info(f"📊 Deficit Summary:")
-                logger.info(f"  Deficit hours: {len(deficit_hours)} (from hour {first_deficit_hour} onwards)")
-                logger.info(f"  First deficit: hour {first_deficit_hour} (SOC={deficit_hours[0]['soc']:.1f}%)")
-                logger.info(f"  Lowest baseline SOC: {min(baseline_soc[first_deficit_hour:]):.1f}%")
-                logger.info(f"  Energy needed (cumulative): {total_deficit_kwh:.2f} kWh")
-
-                # v1.2.0-beta.25: SMART - Target the most EXPENSIVE deficit hours, not just the first one
-                # Sort deficit hours by price (most expensive first)
-                deficit_hours_sorted_by_price = sorted(deficit_hours, key=lambda x: x['price'], reverse=True)
-
-                # Find the most expensive deficit hours that we should cover
-                # Use top 50% of deficit hours or at least the first 3 hours
-                expensive_deficit_count = max(3, len(deficit_hours) // 2)
-                expensive_deficits = deficit_hours_sorted_by_price[:expensive_deficit_count]
-
-                # Find the LATEST hour among the expensive deficits - we must be charged by then
-                target_hour = max(d['hour'] for d in expensive_deficits)
-
-                # Log the expensive deficit hours we're targeting
-                expensive_prices = [d['price'] * 100 for d in expensive_deficits]
-                logger.info(f"💰 Targeting {len(expensive_deficits)} most expensive deficit hours: "
-                          f"Hours {sorted([d['hour'] for d in expensive_deficits])}, "
-                          f"Prices {[f'{p:.1f}' for p in expensive_prices]} Ct/kWh")
-                logger.info(f"⏰ Must be charged by hour {target_hour} (latest expensive deficit)")
-
-                # SMART: Don't charge if SOC is already high - let it discharge naturally first
-                # Find when SOC drops below "ready to charge" threshold (max_soc - 10%)
-                charge_ready_threshold = max_soc - 10  # e.g. 98% - 10% = 88%
-                earliest_charge_hour = 0
-
-                for h in range(lookahead_hours):
-                    if baseline_soc[h] <= charge_ready_threshold:
-                        earliest_charge_hour = h
-                        logger.info(f"🔋 SOC drops to {baseline_soc[h]:.1f}% at hour {h}, ready to charge")
-                        break
-
-                # If current SOC is high and will discharge naturally, wait
-                if current_soc > charge_ready_threshold and earliest_charge_hour > 0:
-                    logger.info(f"⏳ Current SOC {current_soc:.1f}% > {charge_ready_threshold:.1f}%, "
-                              f"waiting until hour {earliest_charge_hour} to start charging")
-
-                # Check if we have enough time to charge BEFORE the target hour
-                import math
-                needed_hours = math.ceil(total_deficit_kwh / max_charge_power)
-                available_hours_count = target_hour - earliest_charge_hour
-
-                if available_hours_count < needed_hours:
-                    # Not enough time! Must start earlier
-                    earliest_charge_hour = max(0, target_hour - needed_hours)
-                    logger.warning(f"⚠️ Not enough time! Need {needed_hours}h, only {available_hours_count}h available. "
-                                 f"Starting from hour {earliest_charge_hour} instead")
-
-                # Find available hours BETWEEN earliest_charge_hour and target_hour
-                available_hours = []
-                for h in range(earliest_charge_hour, target_hour):
-                    available_hours.append({
-                        'hour': h,
-                        'price': hourly_prices[h]
+            expensive_hours = []
+            for hour in range(lookahead_hours):
+                if hourly_prices[hour] >= price_threshold:
+                    expensive_hours.append({
+                        'hour': hour,
+                        'price': hourly_prices[hour]
                     })
 
-                # Sort by price (cheapest first)
+            logger.info(f"💰 Price Analysis:")
+            logger.info(f"  Average price: {avg_price*100:.1f} Ct/kWh")
+            logger.info(f"  Expensive threshold: {price_threshold*100:.1f} Ct/kWh")
+            logger.info(f"  Expensive hours: {[e['hour'] for e in expensive_hours]}")
+
+            if expensive_hours and deficit_hours:
+                # Step 2: Find first expensive hour - we want battery FULL by then
+                first_expensive_hour = expensive_hours[0]['hour']
+                last_expensive_hour = expensive_hours[-1]['hour']
+                expensive_prices = [e['price'] * 100 for e in expensive_hours]
+
+                logger.info(f"  Expensive prices: {[f'{p:.1f}' for p in expensive_prices[:10]]} Ct/kWh")
+                logger.info(f"🎯 Goal: Battery at {max_soc}% by hour {first_expensive_hour} (first expensive hour)")
+
+                # Step 3: Calculate how much energy we need from current SOC to reach max_soc at first expensive hour
+                cumulative_energy = 0
+                for h in range(0, first_expensive_hour):
+                    net = hourly_pv[h] - hourly_consumption[h]
+                    cumulative_energy += net
+
+                # Projected SOC at first expensive hour WITHOUT charging
+                projected_soc_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                projected_soc_kwh = max(min_kwh, min(max_kwh, projected_soc_kwh))
+                projected_soc_pct = (projected_soc_kwh / battery_capacity) * 100
+
+                # How much do we need to charge to reach max_soc?
+                required_charge_kwh = max(0, max_kwh - projected_soc_kwh)
+
+                logger.info(f"📊 Charging Calculation:")
+                logger.info(f"  Current SOC: {current_soc:.1f}%")
+                logger.info(f"  Projected SOC at hour {first_expensive_hour} (without charging): {projected_soc_pct:.1f}%")
+                logger.info(f"  Target SOC: {max_soc}%")
+                logger.info(f"  Required charge: {required_charge_kwh:.2f} kWh")
+
+                if required_charge_kwh > 0.5:  # Only charge if meaningful
+                    # Step 4: Find cheapest hours BEFORE first expensive hour
+                    available_hours = []
+                    for h in range(0, first_expensive_hour):
+                        # Only consider hours where SOC is not already at max
+                        if baseline_soc[h] < max_soc - 2:  # 2% buffer
+                            available_hours.append({
+                                'hour': h,
+                                'price': hourly_prices[h]
+                            })
+
+                    if not available_hours:
+                        logger.warning(f"⚠️ No available hours to charge before hour {first_expensive_hour}")
+                    else:
+                        # Sort by price (cheapest first)
+                        available_hours.sort(key=lambda x: x['price'])
+
+                        cheapest_5 = [(h['hour'], f"{h['price']*100:.1f}Ct") for h in available_hours[:5]]
+                        logger.info(f"⚡ Cheapest hours available: {cheapest_5}")
+
+                        # Allocate charging to cheapest hours
+                        import math
+                        needed_hours = math.ceil(required_charge_kwh / max_charge_power)
+                        logger.info(f"  Need {needed_hours}h to charge {required_charge_kwh:.2f} kWh @ {max_charge_power:.2f} kW")
+
+                        remaining_kwh = required_charge_kwh
+                        for slot in available_hours:
+                            if remaining_kwh <= 0:
+                                break
+
+                            hour = slot['hour']
+                            charge_kwh = min(remaining_kwh, max_charge_power)
+
+                            hourly_charging[hour] = charge_kwh
+                            remaining_kwh -= charge_kwh
+
+                            charging_windows.append({
+                                'hour': hour,
+                                'charge_kwh': charge_kwh,
+                                'price': slot['price'],
+                                'reason': f'Max battery before expensive hours {first_expensive_hour}-{last_expensive_hour}'
+                            })
+
+                        if remaining_kwh > 0.1:
+                            logger.warning(f"⚠️ Could not allocate all charge! Missing: {remaining_kwh:.2f} kWh")
+
+                        logger.info(f"💡 Economic Strategy: {len(charging_windows)} windows, total {sum(hourly_charging):.2f} kWh")
+                        logger.info(f"   This maximizes battery usage during expensive hours ({price_threshold*100:.1f}+ Ct/kWh)")
+                else:
+                    logger.info(f"✓ Battery naturally at {projected_soc_pct:.1f}% by hour {first_expensive_hour}, no charging needed")
+
+            elif deficit_hours:
+                # Fallback: Only deficits, no expensive hours → use minimal charging
+                first_deficit_hour = deficit_hours[0]['hour']
+                logger.info(f"📊 Fallback: Deficit-only charging (no expensive hours above {price_threshold*100:.1f} Ct)")
+
+                # Calculate minimal energy to stay above min_soc
+                max_cumulative_deficit = 0
+                cumulative_energy = 0
+                for hour in range(first_deficit_hour, lookahead_hours):
+                    net_energy = hourly_pv[hour] - hourly_consumption[hour]
+                    cumulative_energy += net_energy
+                    soc_at_hour_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                    target_kwh = ((min_soc + 10) / 100) * battery_capacity
+                    deficit_at_hour = max(0, target_kwh - soc_at_hour_kwh)
+                    max_cumulative_deficit = max(max_cumulative_deficit, deficit_at_hour)
+
+                required_charge_kwh = max_cumulative_deficit
+                logger.info(f"  Energy needed: {required_charge_kwh:.2f} kWh to stay above {min_soc+10}%")
+
+                # Find cheapest hours before deficit
+                available_hours = []
+                for h in range(0, first_deficit_hour):
+                    available_hours.append({'hour': h, 'price': hourly_prices[h]})
                 available_hours.sort(key=lambda x: x['price'])
 
-                # Allocate charging: ALWAYS use max_charge_power (full power charging)
-                remaining_kwh = total_deficit_kwh
+                remaining_kwh = required_charge_kwh
                 for slot in available_hours:
                     if remaining_kwh <= 0:
                         break
-
                     hour = slot['hour']
-
-                    # Charge with FULL POWER (max_charge_power), not minimum
                     charge_kwh = min(remaining_kwh, max_charge_power)
-
                     hourly_charging[hour] = charge_kwh
                     remaining_kwh -= charge_kwh
-
-                    # Build reason text with expensive deficit hours
-                    expensive_hours_str = ', '.join([str(d['hour']) for d in expensive_deficits[:5]])
-                    if len(expensive_deficits) > 5:
-                        expensive_hours_str += f' (+{len(expensive_deficits)-5} more)'
-
                     charging_windows.append({
                         'hour': hour,
                         'charge_kwh': charge_kwh,
                         'price': slot['price'],
-                        'reason': f'Target expensive hours {expensive_hours_str}'
+                        'reason': f'Prevent deficit at hour {first_deficit_hour}'
                     })
-
-                logger.info(f"💡 Charging Strategy: {len(charging_windows)} windows with FULL POWER ({max_charge_power:.2f} kW)")
 
             logger.info(f"Planned {len(charging_windows)} charging windows, total {sum(hourly_charging):.2f} kWh")
 
