@@ -439,7 +439,7 @@ class TibberOptimizer:
                 logger.info(f"  First deficit at hour {deficit_hours[0]['hour']}: SOC={deficit_hours[0]['soc']:.1f}%")
 
             # =================================================================
-            # STEP 4: Find optimal charging times (v1.2.0-beta.17: FULL POWER)
+            # STEP 4: Find optimal charging times (v1.2.0-beta.17: Smart charging)
             # =================================================================
             charging_windows = []
             hourly_charging = [0.0] * lookahead_hours
@@ -454,13 +454,38 @@ class TibberOptimizer:
                 logger.info(f"  First deficit: hour {first_deficit_hour} (SOC={deficit_hours[0]['soc']:.1f}%)")
                 logger.info(f"  Total energy needed: {total_deficit_kwh:.2f} kWh")
 
-                # Find available hours BEFORE first deficit
+                # SMART: Don't charge if SOC is already high - let it discharge naturally first
+                # Find when SOC drops below "ready to charge" threshold (max_soc - 10%)
+                charge_ready_threshold = max_soc - 10  # e.g. 98% - 10% = 88%
+                earliest_charge_hour = 0
+
+                for h in range(lookahead_hours):
+                    if baseline_soc[h] <= charge_ready_threshold:
+                        earliest_charge_hour = h
+                        logger.info(f"🔋 SOC drops to {baseline_soc[h]:.1f}% at hour {h}, ready to charge")
+                        break
+
+                # If current SOC is high and will discharge naturally, wait
+                if current_soc > charge_ready_threshold and earliest_charge_hour > 0:
+                    logger.info(f"⏳ Current SOC {current_soc:.1f}% > {charge_ready_threshold:.1f}%, "
+                              f"waiting until hour {earliest_charge_hour} to start charging")
+
+                # Find available hours BETWEEN earliest_charge_hour and first_deficit_hour
                 available_hours = []
-                for h in range(0, first_deficit_hour):
+                for h in range(earliest_charge_hour, first_deficit_hour):
                     available_hours.append({
                         'hour': h,
                         'price': hourly_prices[h]
                     })
+
+                if not available_hours:
+                    logger.warning(f"⚠️ No charging window available between hour {earliest_charge_hour} and deficit at {first_deficit_hour}")
+                    # Fallback: use all hours before deficit
+                    for h in range(0, first_deficit_hour):
+                        available_hours.append({
+                            'hour': h,
+                            'price': hourly_prices[h]
+                        })
 
                 # Sort by price (cheapest first)
                 available_hours.sort(key=lambda x: x['price'])
