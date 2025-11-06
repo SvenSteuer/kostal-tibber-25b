@@ -538,21 +538,48 @@ class TibberOptimizer:
                     logger.info(f"   Charge needed: {required_charge_kwh:.2f} kWh")
 
                     if required_charge_kwh > 0.5:
-                        # Find cheapest hours BEFORE this peak
-                        # Start searching from current time or end of previous peak
+                        # JUST-IN-TIME CHARGING (v1.2.0-beta.32):
+                        # Lade so SPÄT WIE MÖGLICH vor dem Peak!
+                        # Verhindert, dass Ladung vor dem Peak wieder entladen wird.
+
+                        # Define earliest possible charging hour
                         search_start = 0
                         if peak_idx > 0:
                             search_start = peaks[peak_idx - 1][-1]['hour'] + 1
 
+                        needed_hours = math.ceil(required_charge_kwh / max_charge_power)
+
+                        # Just-in-Time window: Start 4h before peak, expand if needed
+                        jit_window_size = max(4, needed_hours + 1)  # At least 4h or what we need
+                        jit_start = max(search_start, peak_start - jit_window_size)
+
+                        logger.info(f"   ⏰ Just-in-Time window: Hours {jit_start}-{peak_start-1} ({peak_start - jit_start}h)")
+                        logger.info(f"   Need {needed_hours}h @ {max_charge_power:.2f} kW")
+
+                        # Find available hours in JIT window
                         available_hours = []
-                        for h in range(search_start, peak_start):
-                            # Only consider hours where we haven't already planned charging
-                            # and where SOC is not already at max
+                        for h in range(jit_start, peak_start):
+                            if h < 0 or h >= lookahead_hours:
+                                continue
                             if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
                                 available_hours.append({
                                     'hour': h,
                                     'price': hourly_prices[h]
                                 })
+
+                        # If not enough hours in JIT window, expand gradually
+                        if len(available_hours) < needed_hours:
+                            logger.info(f"   ℹ️ JIT window too small ({len(available_hours)}h), expanding...")
+                            for h in range(jit_start - 1, search_start - 1, -1):
+                                if h < 0:
+                                    break
+                                if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
+                                    available_hours.append({
+                                        'hour': h,
+                                        'price': hourly_prices[h]
+                                    })
+                                if len(available_hours) >= needed_hours * 1.5:  # Some buffer
+                                    break
 
                         if not available_hours:
                             logger.warning(f"   ⚠️ No available hours to charge before peak {peak_idx+1}")
@@ -561,10 +588,7 @@ class TibberOptimizer:
                             available_hours.sort(key=lambda x: x['price'])
 
                             cheapest_3 = [(h['hour'], f"{h['price']*100:.1f}Ct") for h in available_hours[:3]]
-                            logger.info(f"   ⚡ Cheapest hours: {cheapest_3}")
-
-                            needed_hours = math.ceil(required_charge_kwh / max_charge_power)
-                            logger.info(f"   Need {needed_hours}h @ {max_charge_power:.2f} kW")
+                            logger.info(f"   ⚡ Cheapest hours in window: {cheapest_3}")
 
                             # Allocate charging
                             remaining_kwh = required_charge_kwh
