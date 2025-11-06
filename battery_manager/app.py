@@ -1834,6 +1834,195 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
         return None
 
 
+def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
+    """
+    Calculate energy from multiple sensors with synchronized timestamps.
+
+    This function solves the problem that different sensors have different numbers of data points
+    at different times. For example:
+    - Grid sensor: 61,861 data points
+    - PV sensor: 28,099 data points (only when sun is shining)
+    - Battery sensor: 34,110 data points
+
+    The function:
+    1. Fetches history for all sensors
+    2. Creates a unified timeline with all unique timestamps
+    3. For each timestamp, determines the value for each sensor:
+       - If exact data point exists → use it
+       - If no data point exists → use last known value (or 0 for PV which only produces when sun shines)
+    4. Applies trapezoidal rule integration on synchronized data
+
+    Args:
+        ha_client: Home Assistant API client
+        sensors: Dict with sensor config, e.g.:
+                 {'grid': {'id': 'sensor.x', 'allow_negative': True, 'zero_when_missing': False},
+                  'pv': {'id': 'sensor.y', 'allow_negative': False, 'zero_when_missing': True},
+                  'battery': {'id': 'sensor.z', 'allow_negative': True, 'zero_when_missing': False}}
+        start_time: Start datetime
+        end_time: End datetime
+
+    Returns:
+        dict: Energy values in kWh for each sensor, e.g.:
+              {'grid': 1.234, 'pv': 2.345, 'battery': 0.123}
+              Returns None if critical data is missing
+    """
+    try:
+        from datetime import datetime
+
+        # Step 1: Fetch history for all sensors
+        sensor_histories = {}
+        sensor_units = {}
+
+        for sensor_name, sensor_config in sensors.items():
+            sensor_id = sensor_config['id']
+
+            # Get sensor unit
+            sensor_info = ha_client.get_state_with_attributes(sensor_id)
+            unit = None
+            if sensor_info:
+                unit = sensor_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+            sensor_units[sensor_name] = unit
+
+            # Fetch history
+            history = ha_client.get_history(sensor_id, start_time, end_time)
+            if not history or len(history) == 0:
+                logger.warning(f"No history data available for {sensor_name} ({sensor_id})")
+                sensor_histories[sensor_name] = []
+            else:
+                # Parse and validate data points
+                valid_entries = []
+                for entry in history:
+                    try:
+                        value_state = entry.get('state')
+                        if value_state not in ['unknown', 'unavailable', None, '']:
+                            value = float(value_state)
+
+                            # Skip negative values if not allowed
+                            if not sensor_config.get('allow_negative', True) and value < 0:
+                                continue
+
+                            # Skip unrealistically high values
+                            if abs(value) > 1000000:  # > 1 MW seems like an error
+                                continue
+
+                            # Parse timestamp
+                            last_changed = entry.get('last_changed')
+                            if last_changed:
+                                ts = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                                valid_entries.append((ts, value))
+                    except (ValueError, TypeError):
+                        continue
+
+                # Sort by timestamp
+                valid_entries.sort(key=lambda x: x[0])
+                sensor_histories[sensor_name] = valid_entries
+                logger.info(f"{sensor_name}: Retrieved {len(valid_entries)} valid data points")
+
+        # Step 2: Collect all unique timestamps
+        all_timestamps = set()
+        for entries in sensor_histories.values():
+            for ts, _ in entries:
+                all_timestamps.add(ts)
+
+        if not all_timestamps:
+            logger.warning("No timestamps found in any sensor data")
+            return None
+
+        # Sort timestamps
+        sorted_timestamps = sorted(all_timestamps)
+        logger.info(f"Total unique timestamps: {len(sorted_timestamps)}")
+
+        # Step 3: Create synchronized data series for each sensor
+        synchronized_series = {}
+
+        for sensor_name, entries in sensor_histories.items():
+            zero_when_missing = sensors[sensor_name].get('zero_when_missing', False)
+
+            # Create lookup dict: timestamp -> value
+            value_lookup = {ts: val for ts, val in entries}
+
+            # Build synchronized series
+            synchronized_values = []
+            last_known_value = 0  # Default for missing data
+
+            for ts in sorted_timestamps:
+                if ts in value_lookup:
+                    # Exact data point exists
+                    value = value_lookup[ts]
+                    last_known_value = value
+                    synchronized_values.append((ts, value))
+                else:
+                    # No data point at this timestamp
+                    if zero_when_missing:
+                        # Use 0 (e.g., for PV at night)
+                        synchronized_values.append((ts, 0))
+                    else:
+                        # Use last known value (e.g., for grid/battery)
+                        synchronized_values.append((ts, last_known_value))
+
+            synchronized_series[sensor_name] = synchronized_values
+            logger.debug(f"{sensor_name}: Synchronized to {len(synchronized_values)} data points")
+
+        # Step 4: Calculate energy using trapezoidal rule
+        results = {}
+
+        for sensor_name, synchronized_values in synchronized_series.items():
+            unit = sensor_units[sensor_name]
+            is_energy_sensor = unit and ('wh' in unit or 'kwh' in unit)
+
+            if is_energy_sensor:
+                # Energy sensor: Calculate difference (end - start)
+                if len(synchronized_values) >= 2:
+                    first_value = synchronized_values[0][1]
+                    last_value = synchronized_values[-1][1]
+                    energy = last_value - first_value
+
+                    # Convert Wh to kWh if needed
+                    if unit and 'wh' in unit and 'kwh' not in unit:
+                        energy = energy / 1000
+
+                    results[sensor_name] = energy
+                    logger.info(f"✓ {sensor_name} (energy sensor, {unit}): {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
+                else:
+                    results[sensor_name] = 0
+                    logger.warning(f"{sensor_name}: Not enough data points for energy calculation")
+            else:
+                # Power sensor: Integrate using trapezoidal rule
+                total_energy_wh = 0.0
+
+                for i in range(len(synchronized_values) - 1):
+                    ts1, value1 = synchronized_values[i]
+                    ts2, value2 = synchronized_values[i + 1]
+
+                    # Calculate time difference in hours
+                    time_diff_hours = (ts2 - ts1).total_seconds() / 3600.0
+
+                    # Trapezoidal rule: average of two consecutive readings × time
+                    avg_power = (value1 + value2) / 2.0
+                    energy_increment = avg_power * time_diff_hours
+
+                    total_energy_wh += energy_increment
+
+                # Convert W to kW if needed (average > 50 likely means Watts)
+                if synchronized_values:
+                    avg_value = sum(v for _, v in synchronized_values) / len(synchronized_values)
+                    if abs(avg_value) > 50:
+                        energy = total_energy_wh / 1000  # W·h → kW·h
+                    else:
+                        energy = total_energy_wh  # Already in kW·h
+                else:
+                    energy = 0
+
+                results[sensor_name] = energy
+                logger.info(f"✓ {sensor_name} (power sensor, {unit or 'unknown'}): Integrated {len(synchronized_values)} samples = {energy:.3f} kWh")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error calculating synchronized energy: {e}", exc_info=True)
+        return None
+
+
 def get_home_consumption_kwh(ha_client, config, timestamp):
     """
     Calculate actual home consumption in kWh from grid, PV, and battery sensors.
@@ -1874,10 +2063,39 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         # Get battery sensor (can be positive or negative)
         battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
 
-        # Calculate hourly energy (now returns kWh directly)
-        grid_kwh = calculate_hourly_average(ha_client, grid_sensor, timestamp, allow_negative=True)
-        pv_kwh = calculate_hourly_average(ha_client, pv_sensor, timestamp, allow_negative=False)
-        battery_kwh = calculate_hourly_average(ha_client, battery_sensor, timestamp, allow_negative=True)
+        # Calculate time range: from 1 hour ago to now
+        end_time = timestamp
+        start_time = timestamp - timedelta(hours=1)
+
+        # NEW: Use synchronized calculation to handle different data point counts
+        sensors_config = {
+            'grid': {
+                'id': grid_sensor,
+                'allow_negative': True,
+                'zero_when_missing': False  # Use last known value
+            },
+            'pv': {
+                'id': pv_sensor,
+                'allow_negative': False,
+                'zero_when_missing': True  # PV = 0 when no data (e.g., at night)
+            },
+            'battery': {
+                'id': battery_sensor,
+                'allow_negative': True,
+                'zero_when_missing': False  # Use last known value
+            }
+        }
+
+        logger.info(f"Calculating synchronized energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
+
+        if not energy_results:
+            logger.warning("Failed to calculate synchronized energy")
+            return None
+
+        grid_kwh = energy_results.get('grid')
+        pv_kwh = energy_results.get('pv')
+        battery_kwh = energy_results.get('battery')
 
         if grid_kwh is None or pv_kwh is None:
             logger.warning(f"Missing data - Grid: {grid_kwh}, PV: {pv_kwh}")
