@@ -1831,6 +1831,42 @@ def controller_loop():
 
     # v0.3.1 - Calculate charging plan immediately on startup
     update_charging_plan()
+
+    # v1.1.1 - Also calculate 48h battery schedule on startup
+    if ha_client and tibber_optimizer and consumption_learner:
+        try:
+            logger.info("Calculating initial 48h battery schedule...")
+            soc_sensor = config.get('battery_soc_sensor', 'sensor.zwh8_8500_battery_soc')
+            soc_value = ha_client.get_state(soc_sensor)
+            current_soc = float(soc_value) if soc_value and soc_value != 'unavailable' else app_state['battery'].get('soc', 50)
+
+            # Get Tibber prices
+            tibber_sensor = config.get('tibber_price_sensor', 'sensor.tibber_prices')
+            attrs = ha_client.get_attributes(tibber_sensor)
+            prices = []
+            if attrs:
+                today_prices = attrs.get('today', [])
+                tomorrow_prices = attrs.get('tomorrow', [])
+                prices = today_prices + tomorrow_prices
+
+            # Generate initial 48h schedule
+            schedule = tibber_optimizer.plan_daily_battery_schedule(
+                ha_client=ha_client,
+                config=config,
+                current_soc=current_soc,
+                prices=prices
+            )
+
+            if schedule:
+                app_state['daily_battery_schedule'] = schedule
+                logger.info(f"✓ Initial 48h schedule calculated: "
+                          f"{len(schedule.get('charging_windows', []))} charging windows, "
+                          f"min SOC {schedule.get('min_soc_reached', 0):.1f}%")
+            else:
+                logger.warning("Failed to generate initial 48h battery schedule")
+        except Exception as e:
+            logger.error(f"Error calculating initial 48h schedule: {e}", exc_info=True)
+
     last_plan_update = datetime.now()
 
     while True:

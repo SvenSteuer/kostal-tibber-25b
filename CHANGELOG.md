@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.2] - 2025-11-06
+
+### Fixed
+- **48h Schedule beim Start** - Schedule wird jetzt sofort beim Start berechnet
+  - Behebt: "No daily battery schedule available" Warnung
+  - Ladesteuerung funktioniert ab der ersten Sekunde
+- **Economic Charging Timing** - Lädt nicht mehr in der aktuellen Stunde
+  - Problem: Um 8:46 Uhr plante es Laden "um 8:00" (zu spät!)
+  - Lösung: Economic Charging startet jetzt bei `current_hour + 1`
+- **Realistischere Vergangenheits-Schätzung** - SOC-Rückwärtsberechnung verbessert
+  - Problem: Große SOC-Sprünge (29% → 91%) verwirrten das System
+  - Lösung: Sanity-Check verhindert unrealistische Schätzungen (>50% Abweichung)
+  - Fallback: Verwendet 70% als typischen Mitternachts-Wert
+
+### Technical
+- Added initial 48h schedule calculation in controller_loop startup
+- Economic charging loop: `range(current_hour + 1, 48)` statt `range(current_hour, 48)`
+- Sanity check in both `baseline_soc` and `final_soc` calculations
+- Improved debug logging for large SOC deviations
+
 ## [1.1.1] - 2025-11-05
 
 ### Fixed
