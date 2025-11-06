@@ -612,27 +612,36 @@ class TibberOptimizer:
                         if lowest_soc_hour == jit_start and lowest_soc_kwh <= min_kwh + 0.5 and not window_expanded:
                             logger.info(f"   ⚠️ Lowest at JIT-start! Expanding window earlier...")
                             # Expand window to include earlier hours
+                            expansion_found = False
                             for h in range(jit_start - 1, search_start - 1, -1):
                                 if h < 0:
                                     break
                                 if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
                                     available_hours.append({'hour': h, 'price': hourly_prices[h]})
+                                    expansion_found = True
                                 if len(available_hours) >= 10:  # Enough hours
                                     break
-                            available_hours.sort(key=lambda x: x['price'])
-                            window_expanded = True
-                            # Recalculate JIT-start
-                            if available_hours:
-                                jit_start = min(h['hour'] for h in available_hours)
-                                # Recalculate SOC at new JIT-start
-                                cumulative_energy = 0
-                                for h in range(0, jit_start):
-                                    net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
-                                    cumulative_energy += net
-                                soc_at_jit_start_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
-                                soc_at_jit_start_kwh = max(min_kwh, min(max_kwh, soc_at_jit_start_kwh))
-                                logger.info(f"   ✅ Window expanded to hour {jit_start}, restarting iteration...")
-                            continue  # Restart iteration with expanded window
+
+                            if expansion_found:
+                                available_hours.sort(key=lambda x: x['price'])
+                                window_expanded = True
+                                # Recalculate JIT-start
+                                if available_hours:
+                                    jit_start = min(h['hour'] for h in available_hours)
+                                    # Recalculate SOC at new JIT-start
+                                    cumulative_energy = 0
+                                    for h in range(0, jit_start):
+                                        net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
+                                        cumulative_energy += net
+                                    soc_at_jit_start_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                                    soc_at_jit_start_kwh = max(min_kwh, min(max_kwh, soc_at_jit_start_kwh))
+                                    logger.info(f"   ✅ Window expanded to hour {jit_start}, restarting iteration...")
+                                continue  # Restart iteration with expanded window
+                            else:
+                                # Cannot expand further - accept lower target
+                                logger.info(f"   ⚠️ Cannot expand window further, using cheaper hours only")
+                                window_expanded = True  # Prevent infinite loop
+                                break  # Exit iteration, use what we have
 
                         # Check if we reached target
                         if lowest_soc_kwh >= target_lowest_kwh - 0.1:  # 0.1 kWh tolerance
@@ -658,6 +667,7 @@ class TibberOptimizer:
                     # Step 6: Apply the final charging plan
                     if required_charge_kwh > 0.5 and available_hours:
                         remaining_kwh = required_charge_kwh
+                        initial_kwh = required_charge_kwh
 
                         cheapest_3 = [(h['hour'], f"{h['price']*100:.1f}Ct") for h in available_hours[:3]]
                         logger.info(f"   ⚡ Cheapest hours: {cheapest_3}")
@@ -668,12 +678,19 @@ class TibberOptimizer:
                                 break
 
                             hour = slot['hour']
+                            price_ct = slot['price'] * 100
 
                             # Check if this hour has significant PV that makes charging unnecessary
                             # Skip if PV > 3 kW and hour is close to peak (within 2h)
                             if hourly_pv[hour] > 3.0 and abs(hour - peak_start) <= 2:
                                 logger.info(f"   ⏭️ Skip hour {hour}: High PV ({hourly_pv[hour]:.1f} kWh) near peak")
                                 continue
+
+                            # Skip expensive hours if we already charged > 60% of target
+                            charged_so_far = initial_kwh - remaining_kwh
+                            if price_ct > 28.5 and charged_so_far > initial_kwh * 0.6:
+                                logger.info(f"   ⏭️ Skip hour {hour}: Too expensive ({price_ct:.1f} Ct), have {charged_so_far:.1f}/{initial_kwh:.1f} kWh")
+                                break  # Stop here, accept partial charge
 
                             charge_kwh = min(remaining_kwh, max_charge_power)
 
@@ -690,7 +707,7 @@ class TibberOptimizer:
                             logger.info(f"   ✓ Charge hour {hour}: {charge_kwh:.2f} kWh @ {slot['price']*100:.1f} Ct")
 
                         if remaining_kwh > 0.5:
-                            logger.warning(f"   ⚠️ Could not allocate all charge! Missing: {remaining_kwh:.2f} kWh")
+                            logger.info(f"   ℹ️ Partial charge: {initial_kwh - remaining_kwh:.1f}/{initial_kwh:.1f} kWh (skipped expensive hours)")
                     else:
                         logger.info(f"   ✓ Sufficient SOC, no charging needed")
 
