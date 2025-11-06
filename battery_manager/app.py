@@ -1721,7 +1721,11 @@ def get_charging_status_explanation():
 
 def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=False):
     """
-    Calculate hourly average from 5-minute sensor values.
+    Calculate hourly energy consumption from sensor history.
+
+    Handles both power sensors (W/kW) and energy sensors (Wh/kWh):
+    - Power sensors: Integrates using trapezoidal rule (average × time)
+    - Energy sensors: Calculates difference (end - start)
 
     Args:
         ha_client: Home Assistant API client
@@ -1730,10 +1734,10 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
         allow_negative: If True, allows negative values (e.g., for grid feed-in)
 
     Returns:
-        float: Average value in kWh, or None if error/unavailable
+        float: Energy in kWh for the past hour, or None if error/unavailable
     """
     try:
-        from datetime import timedelta
+        from datetime import timedelta, datetime
 
         # Calculate time range: from 1 hour ago to now
         end_time = timestamp
@@ -1745,8 +1749,14 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
             logger.warning(f"No history data available for {sensor_id}")
             return None
 
-        # Calculate average from all readings
-        valid_values = []
+        # Get sensor unit to determine if it's power or energy
+        sensor_info = ha_client.get_state_with_attributes(sensor_id)
+        unit = None
+        if sensor_info:
+            unit = sensor_info.get('attributes', {}).get('unit_of_measurement', '').lower()
+
+        # Collect valid values with timestamps
+        valid_entries = []
         for entry in history:
             try:
                 value_state = entry.get('state')
@@ -1761,19 +1771,63 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
                     if abs(value) > 1000000:  # > 1 MW seems like an error
                         continue
 
-                    valid_values.append(value)
-            except (ValueError, TypeError):
+                    # Parse timestamp
+                    last_changed = entry.get('last_changed')
+                    if last_changed:
+                        ts = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                        valid_entries.append((ts, value))
+            except (ValueError, TypeError) as e:
                 continue
 
-        if not valid_values:
+        if not valid_entries:
             logger.warning(f"No valid values in history for {sensor_id}")
             return None
 
-        # Calculate average
-        avg_value = sum(valid_values) / len(valid_values)
+        # Sort by timestamp
+        valid_entries.sort(key=lambda x: x[0])
 
-        logger.debug(f"Calculated average from {len(valid_values)} samples for {sensor_id}: {avg_value:.3f}")
-        return avg_value
+        # Determine sensor type and calculate energy
+        is_energy_sensor = unit and ('wh' in unit or 'kwh' in unit)
+
+        if is_energy_sensor:
+            # Energy sensor (Wh/kWh): Calculate difference (end - start)
+            # This handles cumulative energy counters
+            first_value = valid_entries[0][1]
+            last_value = valid_entries[-1][1]
+            energy = last_value - first_value
+
+            # Convert Wh to kWh if needed
+            if unit and 'wh' in unit and 'kwh' not in unit:
+                energy = energy / 1000
+
+            logger.info(f"✓ Energy sensor ({unit}): {sensor_id}: {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
+        else:
+            # Power sensor (W/kW): Integrate using trapezoidal rule
+            # Energy = average power × time
+            total_energy_wh = 0.0
+
+            for i in range(len(valid_entries) - 1):
+                ts1, value1 = valid_entries[i]
+                ts2, value2 = valid_entries[i + 1]
+
+                # Calculate time difference in hours
+                time_diff_hours = (ts2 - ts1).total_seconds() / 3600.0
+
+                # Trapezoidal rule: average of two consecutive readings × time
+                avg_power = (value1 + value2) / 2.0
+                energy_increment = avg_power * time_diff_hours
+
+                total_energy_wh += energy_increment
+
+            # Convert W to kW if needed (values > 50 are likely in Watts)
+            if abs(sum(v for _, v in valid_entries) / len(valid_entries)) > 50:
+                energy = total_energy_wh / 1000  # W·h → kW·h
+            else:
+                energy = total_energy_wh  # Already in kW·h
+
+            logger.info(f"✓ Power sensor ({unit or 'unknown'}): {sensor_id}: Integrated {len(valid_entries)} samples = {energy:.3f} kWh")
+
+        return energy
 
     except Exception as e:
         logger.error(f"Error calculating hourly average for {sensor_id}: {e}", exc_info=True)
@@ -1820,42 +1874,26 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         # Get battery sensor (can be positive or negative)
         battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
 
-        # Calculate hourly averages
-        grid_avg_w = calculate_hourly_average(ha_client, grid_sensor, timestamp, allow_negative=True)
-        pv_avg_w = calculate_hourly_average(ha_client, pv_sensor, timestamp, allow_negative=False)
-        battery_avg_w = calculate_hourly_average(ha_client, battery_sensor, timestamp, allow_negative=True)
+        # Calculate hourly energy (now returns kWh directly)
+        grid_kwh = calculate_hourly_average(ha_client, grid_sensor, timestamp, allow_negative=True)
+        pv_kwh = calculate_hourly_average(ha_client, pv_sensor, timestamp, allow_negative=False)
+        battery_kwh = calculate_hourly_average(ha_client, battery_sensor, timestamp, allow_negative=True)
 
-        if grid_avg_w is None or pv_avg_w is None:
-            logger.warning(f"Missing data - Grid: {grid_avg_w}, PV: {pv_avg_w}")
+        if grid_kwh is None or pv_kwh is None:
+            logger.warning(f"Missing data - Grid: {grid_kwh}, PV: {pv_kwh}")
             return None
 
         # Battery is optional - if not available, assume 0
-        if battery_avg_w is None:
+        if battery_kwh is None:
             logger.debug(f"Battery sensor not available, assuming 0")
-            battery_avg_w = 0
-
-        # Convert W to kWh if needed (values > 50 are likely Watt)
-        if abs(grid_avg_w) > 50:
-            grid_avg_kwh = grid_avg_w / 1000
-        else:
-            grid_avg_kwh = grid_avg_w
-
-        if pv_avg_w > 50:
-            pv_avg_kwh = pv_avg_w / 1000
-        else:
-            pv_avg_kwh = pv_avg_w
-
-        if abs(battery_avg_w) > 50:
-            battery_avg_kwh = battery_avg_w / 1000
-        else:
-            battery_avg_kwh = battery_avg_w
+            battery_kwh = 0
 
         # Calculate home consumption
         # Home = PV + Grid + Battery
         # (Battery positive = discharging = adds to home consumption)
-        home_consumption_kwh = pv_avg_kwh + grid_avg_kwh + battery_avg_kwh
+        home_consumption_kwh = pv_kwh + grid_kwh + battery_kwh
 
-        logger.info(f"Home consumption calculated: PV={pv_avg_kwh:.3f} kWh + Grid={grid_avg_kwh:.3f} kWh + Battery={battery_avg_kwh:.3f} kWh = Home={home_consumption_kwh:.3f} kWh")
+        logger.info(f"Home consumption calculated: PV={pv_kwh:.3f} kWh + Grid={grid_kwh:.3f} kWh + Battery={battery_kwh:.3f} kWh = Home={home_consumption_kwh:.3f} kWh")
 
         # Validate result
         if home_consumption_kwh < 0:
