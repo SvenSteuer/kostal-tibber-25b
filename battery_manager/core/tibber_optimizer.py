@@ -504,48 +504,46 @@ class TibberOptimizer:
                     logger.info(f"🎯 Planning for Peak {peak_idx+1}: Hours {peak_start}-{peak_end}")
                     logger.info(f"   Peak prices: {peak_prices_list} Ct/kWh")
 
-                    # v1.2.0-beta.33: IMPROVED energy calculation
-                    # OLD: Only calculated energy during peak
-                    # NEW: Calculate energy from END of JIT window to END of peak
-                    #      This accounts for discharge BETWEEN charging and peak!
+                    # v1.2.0-beta.34: ITERATIVE simulation
+                    # Problem in beta.33: Calculated SOC at JIT-end WITHOUT the charging we're planning!
+                    # Solution: Iteratively simulate JIT-start to peak-end WITH hypothetical charging,
+                    #           adjust charge amount until lowest SOC point is above target
 
-                    # Step 1: Determine JIT window (we'll refine this later)
+                    # Step 1: Determine JIT window and search boundaries
                     search_start = 0
                     if peak_idx > 0:
                         search_start = peaks[peak_idx - 1][-1]['hour'] + 1
 
-                    temp_jit_window_size = 4
-                    temp_jit_start = max(search_start, peak_start - temp_jit_window_size)
-                    jit_end = peak_start - 1  # Last hour of JIT window
+                    jit_window_size = 4
+                    jit_start = max(search_start, peak_start - jit_window_size)
+                    jit_end = peak_start - 1
 
-                    # Step 2: Calculate SOC at END of JIT window (before charging)
+                    logger.info(f"   ⏰ Just-in-Time window: Hours {jit_start}-{jit_end}")
+
+                    # Step 2: Calculate SOC at JIT-START (not end!)
                     cumulative_energy = 0
-                    for h in range(0, jit_end + 1):
+                    for h in range(0, jit_start):
                         net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
                         cumulative_energy += net
 
-                    soc_at_jit_end_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
-                    soc_at_jit_end_kwh = max(min_kwh, min(max_kwh, soc_at_jit_end_kwh))
-                    soc_at_jit_end_pct = (soc_at_jit_end_kwh / battery_capacity) * 100
+                    soc_at_jit_start_kwh = (current_soc / 100) * battery_capacity + cumulative_energy
+                    soc_at_jit_start_kwh = max(min_kwh, min(max_kwh, soc_at_jit_start_kwh))
 
-                    # Step 3: Simulate from JIT end to AFTER peak end to find lowest point
-                    # This tells us how much energy we need
-                    lowest_soc_kwh = soc_at_jit_end_kwh
-                    sim_soc_kwh = soc_at_jit_end_kwh
+                    # Step 3: Find available hours in JIT window
+                    available_hours = []
+                    for h in range(jit_start, peak_start):
+                        if h < 0 or h >= lookahead_hours:
+                            continue
+                        if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
+                            available_hours.append({
+                                'hour': h,
+                                'price': hourly_prices[h]
+                            })
 
-                    for h in range(jit_end + 1, peak_end + 2):  # Simulate through peak + 1 hour
-                        if h >= lookahead_hours:
-                            break
-                        net = hourly_pv[h] + hourly_charging[h] - hourly_consumption[h]
-                        sim_soc_kwh += net
-                        sim_soc_kwh = max(min_kwh, min(max_kwh, sim_soc_kwh))
-                        lowest_soc_kwh = min(lowest_soc_kwh, sim_soc_kwh)
+                    # Sort by price (cheapest first)
+                    available_hours.sort(key=lambda x: x['price'])
 
-                    # Step 4: How much do we need to charge to keep SOC above min + buffer?
-                    target_lowest_kwh = ((min_soc + 15) / 100) * battery_capacity  # 15% buffer above min
-                    required_charge_kwh = max(0, target_lowest_kwh - lowest_soc_kwh)
-
-                    # Also ensure we can cover peak hours with decent SOC
+                    # Step 4: Calculate energy needed during peak (initial estimate)
                     energy_during_peak = 0
                     for h in range(peak_start, peak_end + 1):
                         if h < lookahead_hours:
@@ -553,92 +551,99 @@ class TibberOptimizer:
                             if net_deficit > 0:
                                 energy_during_peak += net_deficit
 
-                    # Use the larger of: what we need for lowest point OR energy during peak
-                    required_charge_kwh = max(required_charge_kwh, energy_during_peak * 1.2)  # 20% buffer
-
                     logger.info(f"   Energy during peak: {energy_during_peak:.2f} kWh")
-                    logger.info(f"   SOC at JIT-end (hour {jit_end}): {soc_at_jit_end_pct:.1f}%")
-                    logger.info(f"   Lowest SOC (JIT-end to peak-end): {(lowest_soc_kwh/battery_capacity)*100:.1f}%")
-                    logger.info(f"   Charge needed: {required_charge_kwh:.2f} kWh")
+                    logger.info(f"   SOC at JIT-start (hour {jit_start}): {(soc_at_jit_start_kwh/battery_capacity)*100:.1f}%")
 
-                    if required_charge_kwh > 0.5:
-                        # JUST-IN-TIME CHARGING (v1.2.0-beta.32):
-                        # Lade so SPÄT WIE MÖGLICH vor dem Peak!
-                        # Verhindert, dass Ladung vor dem Peak wieder entladen wird.
+                    # Start with reasonable estimate: peak energy + 50% buffer
+                    required_charge_kwh = energy_during_peak * 1.5
 
-                        # Define earliest possible charging hour
-                        search_start = 0
-                        if peak_idx > 0:
-                            search_start = peaks[peak_idx - 1][-1]['hour'] + 1
+                    # Step 5: ITERATIVE SIMULATION to find optimal charge
+                    target_lowest_kwh = ((min_soc + 15) / 100) * battery_capacity
+                    max_iterations = 5
 
-                        needed_hours = math.ceil(required_charge_kwh / max_charge_power)
+                    for iteration in range(max_iterations):
+                        # Allocate charge in cheapest hours (temporary)
+                        temp_charge_allocation = {}
+                        remaining_kwh = required_charge_kwh
 
-                        # Just-in-Time window: Start 4h before peak, expand if needed
-                        jit_window_size = max(4, needed_hours + 1)  # At least 4h or what we need
-                        jit_start = max(search_start, peak_start - jit_window_size)
+                        for slot in available_hours:
+                            if remaining_kwh <= 0:
+                                break
+                            hour = slot['hour']
+                            charge_this_hour = min(remaining_kwh, max_charge_power)
+                            temp_charge_allocation[hour] = charge_this_hour
+                            remaining_kwh -= charge_this_hour
 
-                        logger.info(f"   ⏰ Just-in-Time window: Hours {jit_start}-{peak_start-1} ({peak_start - jit_start}h)")
-                        logger.info(f"   Need {needed_hours}h @ {max_charge_power:.2f} kW")
-
-                        # Find available hours in JIT window
-                        available_hours = []
-                        for h in range(jit_start, peak_start):
-                            if h < 0 or h >= lookahead_hours:
-                                continue
-                            if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
-                                available_hours.append({
-                                    'hour': h,
-                                    'price': hourly_prices[h]
-                                })
-
-                        # If not enough hours in JIT window, expand gradually
-                        if len(available_hours) < needed_hours:
-                            logger.info(f"   ℹ️ JIT window too small ({len(available_hours)}h), expanding...")
+                        # If not enough space in JIT window, expand
+                        if remaining_kwh > 0.1 and iteration == 0:
                             for h in range(jit_start - 1, search_start - 1, -1):
-                                if h < 0:
+                                if h < 0 or remaining_kwh <= 0:
                                     break
                                 if hourly_charging[h] == 0 and baseline_soc[h] < max_soc - 2:
-                                    available_hours.append({
-                                        'hour': h,
-                                        'price': hourly_prices[h]
-                                    })
-                                if len(available_hours) >= needed_hours * 1.5:  # Some buffer
-                                    break
+                                    available_hours.append({'hour': h, 'price': hourly_prices[h]})
+                                    available_hours.sort(key=lambda x: x['price'])
 
-                        if not available_hours:
-                            logger.warning(f"   ⚠️ No available hours to charge before peak {peak_idx+1}")
-                        else:
-                            # Sort by price (cheapest first)
-                            available_hours.sort(key=lambda x: x['price'])
+                        # Simulate from JIT-start to peak-end WITH this charging plan
+                        sim_soc_kwh = soc_at_jit_start_kwh
+                        lowest_soc_kwh = sim_soc_kwh
+                        lowest_soc_hour = jit_start
 
-                            cheapest_3 = [(h['hour'], f"{h['price']*100:.1f}Ct") for h in available_hours[:3]]
-                            logger.info(f"   ⚡ Cheapest hours in window: {cheapest_3}")
+                        for h in range(jit_start, min(peak_end + 1, lookahead_hours)):
+                            charge_this_hour = temp_charge_allocation.get(h, 0)
+                            # Include: already planned charging, hypothetical new charging, PV, consumption
+                            net = hourly_pv[h] + hourly_charging[h] + charge_this_hour - hourly_consumption[h]
+                            sim_soc_kwh += net
+                            sim_soc_kwh = max(min_kwh, min(max_kwh, sim_soc_kwh))
 
-                            # Allocate charging
-                            remaining_kwh = required_charge_kwh
-                            for slot in available_hours:
-                                if remaining_kwh <= 0:
-                                    break
+                            if sim_soc_kwh < lowest_soc_kwh:
+                                lowest_soc_kwh = sim_soc_kwh
+                                lowest_soc_hour = h
 
-                                hour = slot['hour']
-                                charge_kwh = min(remaining_kwh, max_charge_power)
+                        logger.info(f"   🔄 Iteration {iteration+1}: Charge {required_charge_kwh:.2f} kWh → Lowest SOC {(lowest_soc_kwh/battery_capacity)*100:.1f}% at hour {lowest_soc_hour}")
 
-                                hourly_charging[hour] = charge_kwh
-                                remaining_kwh -= charge_kwh
+                        # Check if we reached target
+                        if lowest_soc_kwh >= target_lowest_kwh - 0.1:  # 0.1 kWh tolerance
+                            logger.info(f"   ✅ Target reached! Lowest {(lowest_soc_kwh/battery_capacity)*100:.1f}% >= target {(target_lowest_kwh/battery_capacity)*100:.1f}%")
+                            break
 
-                                charging_windows.append({
-                                    'hour': hour,
-                                    'charge_kwh': charge_kwh,
-                                    'price': slot['price'],
-                                    'reason': f'Peak {peak_idx+1} (h{peak_start}-{peak_end} @ {peak[0]["price"]*100:.0f}+ Ct)'
-                                })
+                        # Need more charge - add deficit + 10% buffer
+                        deficit_kwh = target_lowest_kwh - lowest_soc_kwh
+                        required_charge_kwh += deficit_kwh * 1.1
 
-                                logger.info(f"   ✓ Charge hour {hour}: {charge_kwh:.2f} kWh @ {slot['price']*100:.1f} Ct")
+                        if iteration == max_iterations - 1:
+                            logger.warning(f"   ⚠️ Max iterations, lowest {(lowest_soc_kwh/battery_capacity)*100:.1f}% still below target")
 
-                            if remaining_kwh > 0.1:
-                                logger.warning(f"   ⚠️ Could not allocate all charge! Missing: {remaining_kwh:.2f} kWh")
+                    # Step 6: Apply the final charging plan
+                    if required_charge_kwh > 0.5 and available_hours:
+                        remaining_kwh = required_charge_kwh
+
+                        cheapest_3 = [(h['hour'], f"{h['price']*100:.1f}Ct") for h in available_hours[:3]]
+                        logger.info(f"   ⚡ Cheapest hours: {cheapest_3}")
+                        logger.info(f"   📊 Final plan: {required_charge_kwh:.2f} kWh in {math.ceil(required_charge_kwh / max_charge_power)}h @ {max_charge_power:.2f} kW")
+
+                        for slot in available_hours:
+                            if remaining_kwh <= 0:
+                                break
+
+                            hour = slot['hour']
+                            charge_kwh = min(remaining_kwh, max_charge_power)
+
+                            hourly_charging[hour] = charge_kwh
+                            remaining_kwh -= charge_kwh
+
+                            charging_windows.append({
+                                'hour': hour,
+                                'charge_kwh': charge_kwh,
+                                'price': slot['price'],
+                                'reason': f'Peak {peak_idx+1} (h{peak_start}-{peak_end} @ {peak[0]["price"]*100:.0f}+ Ct)'
+                            })
+
+                            logger.info(f"   ✓ Charge hour {hour}: {charge_kwh:.2f} kWh @ {slot['price']*100:.1f} Ct")
+
+                        if remaining_kwh > 0.1:
+                            logger.warning(f"   ⚠️ Could not allocate all charge! Missing: {remaining_kwh:.2f} kWh")
                     else:
-                        logger.info(f"   ✓ Sufficient SOC ({projected_soc_pct:.1f}%), no charging needed for this peak")
+                        logger.info(f"   ✓ Sufficient SOC, no charging needed")
 
                 logger.info(f"")
                 logger.info(f"💡 Multi-Peak Strategy Complete: {len(charging_windows)} windows, total {sum(hourly_charging):.2f} kWh")
