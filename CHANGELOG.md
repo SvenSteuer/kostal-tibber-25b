@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.1] - 2025-11-05
+
+### Fixed
+- **Kritischer Ladefehler behoben** - Batterie lud zur falschen Zeit aufgrund 48h-Logik-Konflikt
+  - Problem: Ladelogik prüfte alle 48 Stunden (0-47) statt nur heute (0-23)
+  - Folge: Batterie konnte zu teuren Zeiten laden, wenn morgige günstige Stunde mit heutiger übereinstimmte
+  - Lösung: Ladeentscheidung prüft jetzt explizit nur `window['hour'] < 24`
+- **Veralteter Code entfernt** - Alte 24h-Fallback-Logik komplett entfernt
+  - Entfernt: `should_charge_now()` Methode (nicht mehr benötigt)
+  - System nutzt jetzt ausschließlich den 48h-Plan für Ladeentscheidungen
+- **Verbessertes Debug-Logging** - Zeigt jetzt warum geladen/nicht geladen wird
+
+### Changed
+- Charging-Logik nutzt nur noch `plan_daily_battery_schedule()` mit 48h-Fenstern
+- Keine Fallback-Methoden mehr - klare, konsistente Ladesteuerung
+
 ## [1.1.0] - 2025-11-05
 
 ### Added
