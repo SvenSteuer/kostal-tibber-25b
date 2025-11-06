@@ -394,12 +394,31 @@ class TibberOptimizer:
             max_kwh = (max_soc / 100) * battery_capacity
             soc_kwh = (current_soc / 100) * battery_capacity
 
+            logger.info(f"🔋 Starting baseline SOC simulation from {current_soc:.1f}% ({soc_kwh:.2f} kWh)")
+            logger.info(f"   Battery limits: min={min_soc}% ({min_kwh:.2f} kWh), max={max_soc}% ({max_kwh:.2f} kWh)")
+
             for hour in range(1, lookahead_hours):
+                soc_before = soc_kwh
+                soc_before_pct = (soc_before / battery_capacity) * 100
+
                 # Energy from PREVIOUS hour
                 net_energy = hourly_pv[hour - 1] - hourly_consumption[hour - 1]
                 soc_kwh += net_energy
-                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+
+                # Smart clamping: Allow discharge from above max_soc, but prevent charging above it
+                if net_energy > 0:
+                    # Adding energy (PV surplus): cap at max_soc
+                    soc_kwh = min(max_kwh, soc_kwh)
+
+                # Always respect minimum SOC
+                soc_kwh = max(min_kwh, soc_kwh)
+
                 baseline_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+                # Debug: Log first 5 hours in detail
+                if hour <= 5:
+                    logger.info(f"   Hour {hour}: SOC {soc_before_pct:.1f}% → {baseline_soc[hour]:.1f}% "
+                              f"(PV={hourly_pv[hour-1]:.2f}, Cons={hourly_consumption[hour-1]:.2f}, Net={net_energy:+.2f} kWh)")
 
             # Find deficit hours (SOC below threshold)
             deficit_hours = []
@@ -518,12 +537,31 @@ class TibberOptimizer:
             final_soc[0] = current_soc
             soc_kwh = (current_soc / 100) * battery_capacity
 
+            logger.info(f"🔋 Starting final SOC calculation with charging from {current_soc:.1f}% ({soc_kwh:.2f} kWh)")
+
             for hour in range(1, lookahead_hours):
+                soc_before = soc_kwh
+                soc_before_pct = (soc_before / battery_capacity) * 100
+
                 # Energy from PREVIOUS hour (PV + charging - consumption)
                 net_energy = hourly_pv[hour - 1] + hourly_charging[hour - 1] - hourly_consumption[hour - 1]
                 soc_kwh += net_energy
-                soc_kwh = max(min_kwh, min(max_kwh, soc_kwh))
+
+                # Smart clamping: Allow discharge from above max_soc, but prevent charging above it
+                if net_energy > 0:
+                    # Adding energy (PV surplus or grid charging): cap at max_soc
+                    soc_kwh = min(max_kwh, soc_kwh)
+
+                # Always respect minimum SOC
+                soc_kwh = max(min_kwh, soc_kwh)
+
                 final_soc[hour] = (soc_kwh / battery_capacity) * 100
+
+                # Debug: Log first 5 hours in detail
+                if hour <= 5:
+                    charge_str = f", Charge={hourly_charging[hour-1]:.2f}" if hourly_charging[hour-1] > 0 else ""
+                    logger.info(f"   Hour {hour}: SOC {soc_before_pct:.1f}% → {final_soc[hour]:.1f}% "
+                              f"(PV={hourly_pv[hour-1]:.2f}, Cons={hourly_consumption[hour-1]:.2f}{charge_str}, Net={net_energy:+.2f} kWh)")
 
             min_soc_reached = min(final_soc)
             logger.info(f"✅ Rolling plan complete: Min SOC {min_soc_reached:.1f}%, "
