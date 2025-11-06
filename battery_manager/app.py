@@ -1942,18 +1942,19 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
             else:
                 # Power sensor: Average power value
                 # For hourly calculation: average_power (W) * 1h = energy (Wh)
-                # Convert W to kWh: average / 1000
+                # Convert based on actual unit from sensor
 
-                # Detect if values are in Watts (typically > 50) or kW (typically < 50)
-                if abs(average_value) > 50:
-                    # Likely in Watts
-                    energy = average_value / 1000  # W → kWh (for 1 hour)
+                if unit and ('kw' in unit or 'kilowatt' in unit):
+                    # Already in kW - multiply by 1 hour = kWh
+                    energy = average_value
+                    logger.info(f"✓ {sensor_name} (power sensor, {unit}): avg={average_value:.3f} kW → {energy:.3f} kWh")
                 else:
-                    # Likely in kW
-                    energy = average_value  # kW * 1h = kWh
+                    # Assume Watts (default for power sensors)
+                    # Convert W to kWh: (W * 1h) / 1000
+                    energy = average_value / 1000
+                    logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}): avg={average_value:.3f} W → {energy:.3f} kWh")
 
                 results[sensor_name] = energy
-                logger.info(f"✓ {sensor_name} (power sensor, {unit or 'unknown'}): avg={average_value:.3f} → {energy:.3f} kWh")
 
         return results
 
