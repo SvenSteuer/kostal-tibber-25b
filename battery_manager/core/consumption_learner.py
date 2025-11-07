@@ -1024,6 +1024,18 @@ class ConsumptionLearner:
             # - Prefer learned (is_manual=0) over imported (is_manual=1)
             # - Use latest created_at as tiebreaker
 
+            # Debug: Show all data in DB for 31.10.2024
+            if target_date and target_date.isoformat() == '2024-10-31':
+                logger.info("🔍 DEBUG 31.10. - Alle Einträge in hourly_consumption:")
+                debug_cursor = conn.execute("""
+                    SELECT timestamp, hour, consumption_kwh, is_manual, created_at
+                    FROM hourly_consumption
+                    WHERE DATE(timestamp) = '2024-10-31'
+                    ORDER BY hour
+                """)
+                for row in debug_cursor:
+                    logger.info(f"  {row[0]} | hour={row[1]} | {row[2]:.3f} kWh | manual={row[3]} | created={row[4]}")
+
             if weekday_filter is not None:
                 # Filter by weekday
                 cursor = conn.execute("""
