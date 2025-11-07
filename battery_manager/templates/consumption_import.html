@@ -94,9 +94,12 @@
         <p>Importiere automatisch die letzten 28 Tage aus deinem Home Assistant Verbrauchssensor.</p>
         <p><strong>Sensor:</strong> <code>{{ config.get('home_consumption_sensor', 'Nicht konfiguriert') }}</code></p>
 
-        <div style="margin-top: 1rem;">
+        <div style="margin-top: 1rem; display: flex; flex-wrap: wrap; gap: 0.75rem;">
             <button onclick="importFromHA()" class="btn btn-primary">
                 📥 Jetzt aus Home Assistant importieren
+            </button>
+            <button onclick="clearAllData()" class="btn btn-danger">
+                🗑️ Gesamte Datenbank leeren
             </button>
         </div>
 
@@ -317,6 +320,41 @@ function importFromHA() {
                 ${error}
             </div>
         `;
+    });
+}
+
+function clearAllData() {
+    if (!confirm('⚠️ Wirklich die gesamte Verbrauchsdatenbank löschen?\n\nDies entfernt ALLE importierten und gelernten Daten.')) {
+        return;
+    }
+
+    showLoading('Lösche alle Verbrauchsdaten...');
+
+    fetch(apiUrl('api/consumption_import/clear_all'), {
+        method: 'POST'
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideLoading();
+        if (data.success) {
+            const deleted = data.deleted || 0;
+            showNotification('success', `🗑️ Datenbank geleert (${deleted} Einträge entfernt)`);
+            document.getElementById('haImportResult').innerHTML = `
+                <div style="color: #FFC107; padding: 1rem; background: rgba(255,193,7,0.1); border-radius: 4px;">
+                    <strong>🗑️ Datenbank geleert</strong><br>
+                    ${deleted} Einträge entfernt
+                </div>
+            `;
+            document.getElementById('importResult').innerHTML = '';
+            tableData = [];
+            renderTable();
+        } else {
+            showNotification('error', `❌ Löschen fehlgeschlagen: ${data.error}`);
+        }
+    })
+    .catch(error => {
+        hideLoading();
+        showNotification('error', 'Fehler beim Löschen: ' + error);
     });
 }
 
