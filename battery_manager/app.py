@@ -1744,8 +1744,16 @@ def api_consumption_import_ha():
                         logger.info(f"🔍 DEBUG 31.10. - Schreibe in DB: timestamp={timestamp_str}, hour={current_date.hour}, consumption={consumption_kwh:.3f}")
 
                     with sqlite3.connect(consumption_learner.db_path) as conn:
+                        # Delete ALL existing entries for this timestamp (manual AND learned)
+                        # to ensure imported data is the only entry shown
                         conn.execute("""
-                            INSERT OR REPLACE INTO hourly_consumption
+                            DELETE FROM hourly_consumption
+                            WHERE timestamp = ?
+                        """, (timestamp_str,))
+
+                        # Now insert the new imported value
+                        conn.execute("""
+                            INSERT INTO hourly_consumption
                             (timestamp, hour, consumption_kwh, is_manual, created_at)
                             VALUES (?, ?, ?, 1, ?)
                         """, (
