@@ -1731,7 +1731,7 @@ def api_consumption_import_ha():
                 consumption_kwh = get_home_consumption_kwh(ha_client, config, current_date + timedelta(hours=1))
 
                 # Debug logging for 31.10.
-                is_debug_date = current_date.date().isoformat() == '2024-10-31' and current_date.hour < 10
+                is_debug_date = current_date.date().isoformat() == '2025-10-31' and current_date.hour < 10
 
                 if is_debug_date:
                     logger.info(f"🔍 DEBUG 31.10. - Speichere Stunde {current_date.strftime('%H:%M')}: consumption_kwh={consumption_kwh}")
@@ -1786,11 +1786,11 @@ def api_consumption_import_ha():
 
         add_log('INFO', f'✅ HA Import abgeschlossen: {imported_hours} Stunden importiert, {skipped_hours} übersprungen')
 
-        # Debug: Count entries in DB for 31.10.2024
+        # Debug: Count entries in DB for 31.10.2025
         with sqlite3.connect(consumption_learner.db_path) as conn:
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM hourly_consumption
-                WHERE DATE(timestamp) = '2024-10-31'
+                WHERE DATE(timestamp) = '2025-10-31'
             """)
             count = cursor.fetchone()[0]
             logger.info(f"🔍 DEBUG 31.10. - Total Einträge in DB für 31.10.: {count}")
@@ -2474,8 +2474,8 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
             # Extract just values for backward compatibility
             valid_values = [v for _, v in valid_data]
 
-            # Debug logging for 2024-10-31 (first 10 hours)
-            is_debug_date = start_time.date().isoformat() == '2024-10-31' and start_time.hour < 10
+            # Debug logging for 2025-10-31 (first 10 hours)
+            is_debug_date = start_time.date().isoformat() == '2025-10-31' and start_time.hour < 10
             if is_debug_date:
                 logger.info(f"🔍 DEBUG 31.10. - {sensor_name} ({start_time.strftime('%H:%M')}): {len(valid_values)} data points")
                 # Show first 5 and last 5 data points
@@ -2662,7 +2662,7 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
             }
 
         # Debug logging for 31.10.
-        is_debug_date = timestamp.date().isoformat() == '2024-10-31' and timestamp.hour <= 10
+        is_debug_date = timestamp.date().isoformat() == '2025-10-31' and timestamp.hour <= 10
 
         if is_debug_date:
             logger.info(f"🔍 DEBUG 31.10. - Calculating energy for {timestamp.strftime('%Y-%m-%d %H:%M')}")
