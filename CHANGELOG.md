@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0-beta.49] - 2025-11-07
+
+### Fixed
+- **Vollständiger HA-Import** - Negative Verbrauchswerte (Sensorfehler) werden auf 0 geklemmt statt übersprungen
+  - Stellt sicher, dass alle 24 Stunden eines Tages importiert werden
+  - Negative Werte (durch Sensor-Timing-Fehler) werden als 0.0 kWh gespeichert
+  - Detailliertes Warning-Logging zeigt Breakdown bei negativen Werten
+  - Verhindert Lücken in den Diagrammen
+
+### Technical
+- `get_home_consumption_kwh()` gibt jetzt 0.0 statt None bei negativen Werten zurück
+- Erweiterte Warn-Logs zeigen vollständigen Breakdown bei negativen Berechnungen
+- Kompatibel mit HA Energy Dashboard Fehlerbehandlung (clamp to zero)
+
 ## [1.2.0-beta.48] - 2025-11-07
 
 ### Added

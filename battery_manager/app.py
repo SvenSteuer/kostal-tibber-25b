@@ -2701,8 +2701,15 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
 
         # Validate result
         if home_consumption_kwh < 0:
-            logger.warning(f"Negative home consumption {home_consumption_kwh:.3f} kWh - likely sensor error")
-            return None
+            # Enhanced debug logging for negative values
+            if is_debug_date or home_consumption_kwh < -0.5:  # Log details if it's debug date or significantly negative
+                logger.warning(f"⚠️ Negative home consumption detected: {home_consumption_kwh:.3f} kWh")
+                logger.warning(f"  Breakdown: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f}")
+                logger.warning(f"  → Clamping to 0.0 kWh (sensor timing error)")
+
+            # Clamp to 0 instead of returning None to ensure complete hourly data
+            # HA Energy Dashboard also handles sensor errors by showing small/zero values
+            return 0.0
 
         return home_consumption_kwh
 
