@@ -1,5 +1,5 @@
 name: Kostal Battery Manager
-version: "1.2.0-beta.42"
+version: "1.2.0-beta.43"
 slug: kostal_battery_manager
 description: "Intelligente Batteriesteuerung für Kostal Plenticore Plus mit Tibber-Optimierung, Verbrauchslernen, prädiktiver Ganztags-Planung und 48h-Grafiken"
 url: "https://github.com/SvenSteuer/kostal-battery-manager"
@@ -81,17 +81,14 @@ options:
   enable_consumption_learning: true
   learning_period_days: 28  # 4 Wochen Lernzeitraum
   home_consumption_sensor: "sensor.home_energy_consumption"
-  # v1.2.0-beta.11: Grid sensors for calculated home consumption (Grid + PV)
-  grid_from_sensor: "sensor.ksem_active_power_from_grid"  # Import from grid (always positive, W)
-  grid_to_sensor: "sensor.ksem_active_power_to_grid"      # Export to grid (always positive, W)
-  pv_total_sensor: "sensor.ksem_sum_pv_power_inverter_dc" # Total PV power (W)
-  # v1.2.0-beta.41: OPTIONAL Energy sensors (kWh counters) - use instead of power sensors for HA Energy Dashboard compatibility
-  # If configured, these will be used instead of the power sensors above
-  # grid_from_energy_sensor: "sensor.ksem_total_active_energy_from_grid"  # Grid import energy counter (kWh)
-  # grid_to_energy_sensor: "sensor.ksem_total_active_energy_to_grid"      # Grid export energy counter (kWh)
-  # battery_discharge_sensor: "sensor.zwh8_8500_battery_discharge_total"  # Battery discharge energy counter (kWh)
-  # battery_charge_from_grid_sensor: "sensor.zwh8_8500_battery_charge_from_grid_total"  # Battery charge from grid (kWh)
-  # battery_charge_from_pv_sensor: "sensor.zwh8_8500_battery_charge_from_pv_total"      # Battery charge from PV (kWh)
+  # v1.2.0-beta.42: Energy sensors (kWh counters) for HA Energy Dashboard compatibility
+  # These are REQUIRED for accurate home consumption calculation
+  grid_from_energy_sensor: "sensor.ksem_total_active_energy_from_grid"  # Grid import energy counter (kWh)
+  grid_to_energy_sensor: "sensor.ksem_total_active_energy_to_grid"      # Grid export energy counter (kWh)
+  battery_discharge_sensor: "sensor.zwh8_8500_battery_discharge_total"  # Battery discharge energy counter (kWh)
+  battery_charge_from_grid_sensor: "sensor.zwh8_8500_battery_charge_from_grid_total"  # Battery charge from grid (kWh)
+  battery_charge_from_pv_sensor: "sensor.zwh8_8500_battery_charge_from_pv_total"      # Battery charge from PV (kWh)
+  pv_total_sensor: "sensor.ksem_sum_pv_power_inverter_dc" # Total PV power sensor (W, will be integrated to kWh)
   # ENTWEDER: Manuelles Lastprofil mit stündlichen Werten (0-23 Uhr)
   # Stündlicher Verbrauch in kW (Durchschnitt über die Stunde)
   # Wird schrittweise durch echte Messwerte überschrieben
@@ -190,16 +187,13 @@ schema:
   home_consumption_sensor: str?
   average_daily_consumption: float?
   default_hourly_consumption_fallback: float?
-  # v1.2.0-beta.11 - Dual grid sensors
-  grid_from_sensor: str?
-  grid_to_sensor: str?
-  pv_total_sensor: str?
-  # v1.2.0-beta.41 - Energy sensors (kWh counters)
-  grid_from_energy_sensor: str?
-  grid_to_energy_sensor: str?
-  battery_discharge_sensor: str?
-  battery_charge_from_grid_sensor: str?
-  battery_charge_from_pv_sensor: str?
+  # v1.2.0-beta.42 - Energy sensors (kWh counters) - REQUIRED for consumption calculation
+  grid_from_energy_sensor: str
+  grid_to_energy_sensor: str
+  battery_discharge_sensor: str
+  battery_charge_from_grid_sensor: str
+  battery_charge_from_pv_sensor: str
+  pv_total_sensor: str
 
   # v0.9.2 - Forecast.Solar Professional API
   enable_forecast_solar_api: bool
