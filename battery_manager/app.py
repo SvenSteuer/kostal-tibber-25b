@@ -1674,7 +1674,7 @@ def api_consumption_import_csv():
 
 @app.route('/api/consumption_import_ha', methods=['POST'])
 def api_consumption_import_ha():
-    """Import consumption data from Home Assistant history (v1.2.0-beta.10 - calculated from Grid + PV)"""
+    """Import consumption data from Home Assistant history (v1.2.0-beta.43 - using Energy sensors)"""
     try:
         if not consumption_learner:
             return jsonify({
@@ -1688,47 +1688,84 @@ def api_consumption_import_ha():
                 'error': 'Home Assistant client not available'
             }), 400
 
-        # v1.2.0-beta.11: Support dual grid sensors (FROM/TO) or legacy single grid sensor
-        grid_from_sensor = config.get('grid_from_sensor')
-        grid_to_sensor = config.get('grid_to_sensor')
-        pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
-        battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
+        # v1.2.0-beta.43: Validate energy sensor configuration
+        grid_from_energy = config.get('grid_from_energy_sensor')
+        grid_to_energy = config.get('grid_to_energy_sensor')
+        battery_discharge_energy = config.get('battery_discharge_sensor')
 
-        # Validate configuration - only dual grid sensor mode is supported now
-        if not grid_from_sensor or not grid_to_sensor:
+        if not grid_from_energy or not grid_to_energy or not battery_discharge_energy:
             return jsonify({
                 'success': False,
-                'error': 'Configuration required: grid_from_sensor and grid_to_sensor must be configured'
-            }), 400
-
-        if not pv_sensor:
-            return jsonify({
-                'success': False,
-                'error': 'pv_total_sensor not configured'
+                'error': 'Configuration required: grid_from_energy_sensor, grid_to_energy_sensor, and battery_discharge_sensor must be configured'
             }), 400
 
         days = request.json.get('days', 28) if request.json else 28
 
-        # v1.2.0: Dual grid sensor mode (Kostal KSEM with separate FROM/TO sensors)
-        # Formula: Hausverbrauch = Netzbezug - Netzeinspeisung + PV + Batterie
-        add_log('INFO', f'Starting HA import with calculated consumption (GridFrom - GridTo + PV + Battery) for last {days} days...')
-        add_log('INFO', f'GridFrom: {grid_from_sensor}, GridTo: {grid_to_sensor}, PV: {pv_sensor}' + (f', Battery: {battery_sensor}' if battery_sensor else ''))
+        # v1.2.0-beta.43: Import using energy sensors (same calculation as live recording)
+        add_log('INFO', f'Starting HA import using energy sensors for last {days} days...')
+        add_log('INFO', f'Using: {grid_from_energy}, {grid_to_energy}, {battery_discharge_energy}')
 
         # Clear all manually imported data before importing new data
         deleted = consumption_learner.clear_all_manual_data()
         add_log('INFO', f'🗑️ Gelöscht: {deleted} alte manuelle Datensätze vor Import')
 
-        # Use dual grid import method with battery support
-        result = consumption_learner.import_calculated_consumption_dual_grid(
-            ha_client, grid_from_sensor, grid_to_sensor, pv_sensor, battery_sensor, days
-        )
+        # Import hour by hour using get_home_consumption_kwh() for consistency
+        from datetime import datetime, timedelta
+        import sqlite3
 
-        if result['success']:
-            add_log('INFO', f'✅ HA Import: {result["imported_hours"]} Stundenwerte aus Home Assistant importiert')
-            return jsonify(result)
-        else:
-            add_log('ERROR', f'❌ HA Import fehlgeschlagen: {result.get("error", "Unknown error")}')
-            return jsonify(result), 400
+        now = datetime.now().astimezone()
+        start_date = now - timedelta(days=days)
+
+        imported_hours = 0
+        skipped_hours = 0
+
+        add_log('INFO', f'Importing from {start_date.strftime("%Y-%m-%d")} to {now.strftime("%Y-%m-%d")}...')
+
+        # Import hour by hour
+        current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = now.replace(minute=0, second=0, microsecond=0)
+
+        while current_date < end_date:
+            try:
+                # Calculate consumption for this hour using the same function as live recording
+                consumption_kwh = get_home_consumption_kwh(ha_client, config, current_date + timedelta(hours=1))
+
+                if consumption_kwh is not None and consumption_kwh >= 0:
+                    # Store in database
+                    with sqlite3.connect(consumption_learner.db_path) as conn:
+                        conn.execute("""
+                            INSERT OR REPLACE INTO hourly_consumption
+                            (timestamp, hour, consumption_kwh, is_manual, created_at)
+                            VALUES (?, ?, ?, 1, ?)
+                        """, (
+                            current_date.isoformat(),
+                            current_date.hour,
+                            consumption_kwh,
+                            datetime.now().astimezone().isoformat()
+                        ))
+                        conn.commit()
+
+                    imported_hours += 1
+
+                    if imported_hours % 24 == 0:
+                        days_done = imported_hours // 24
+                        add_log('INFO', f'... {days_done} Tag(e) importiert ({imported_hours} Stunden)')
+                else:
+                    skipped_hours += 1
+            except Exception as e:
+                logger.error(f"Error importing hour {current_date}: {e}")
+                skipped_hours += 1
+
+            current_date += timedelta(hours=1)
+
+        add_log('INFO', f'✅ HA Import abgeschlossen: {imported_hours} Stunden importiert, {skipped_hours} übersprungen')
+
+        return jsonify({
+            'success': True,
+            'imported_hours': imported_hours,
+            'skipped_hours': skipped_hours,
+            'imported_days': imported_hours // 24
+        })
 
     except Exception as e:
         logger.error(f"Error importing from Home Assistant: {e}", exc_info=True)
