@@ -2338,19 +2338,20 @@ def calculate_hourly_average(ha_client, sensor_id, timestamp, allow_negative=Fal
 
 def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
     """
-    Calculate energy from multiple sensors using simple average method.
+    Calculate energy from multiple sensors using HA Energy Dashboard compatible methods.
 
     For each sensor, this function:
-    1. Fetches all data points in the time range
-    2. Calculates the average of all values (sum / count)
-    3. Treats each sensor independently (no timestamp synchronization)
-    4. Returns 0 if no data exists and zero_when_missing is True
+    1. Fetches all data points in the time range with timestamps
+    2. For Energy Sensors (kWh/Wh): Calculates difference (last - first)
+    3. For Power Sensors (W/kW): Uses Riemann Integration (Trapezoidal method)
+    4. Treats each sensor independently (no timestamp synchronization)
+    5. Returns 0 if no data exists and zero_when_missing is True
 
-    This matches the Energy Dashboard calculation method:
-    - For each hour (e.g., 11:00:00 to 11:59:59)
-    - Take all data points in that range
-    - Calculate average: sum of all values / number of values
-    - Use formula: home consumption = gridnet + battery + pv
+    Riemann Integration for Power Sensors:
+    - Takes timestamps into account (unlike simple average)
+    - Uses Trapezoidal Rule: for each interval, energy = (v1+v2)/2 * time_delta
+    - Matches Home Assistant Energy Dashboard calculation exactly
+    - Much more accurate for unevenly distributed data points
 
     Args:
         ha_client: Home Assistant API client
@@ -2362,7 +2363,7 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
         end_time: End datetime
 
     Returns:
-        dict: Average power values converted to kWh for each sensor, e.g.:
+        dict: Energy values in kWh for each sensor, e.g.:
               {'grid': 1.234, 'pv': 2.345, 'battery': 0.123}
               Returns None if critical data is missing
     """
@@ -2393,8 +2394,8 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                     results[sensor_name] = None
                     continue
 
-            # Parse and validate data points
-            valid_values = []
+            # Parse and validate data points with timestamps
+            valid_data = []  # List of (timestamp, value) tuples
             for entry in history:
                 try:
                     value_state = entry.get('state')
@@ -2409,11 +2410,21 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                         if abs(value) > 1000000:  # > 1 MW seems like an error
                             continue
 
-                        valid_values.append(value)
+                        # Get timestamp
+                        timestamp_str = entry.get('last_changed')
+                        if timestamp_str:
+                            from datetime import datetime
+                            try:
+                                # Parse ISO timestamp
+                                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                valid_data.append((timestamp, value))
+                            except:
+                                # Fallback: just store value without timestamp
+                                valid_data.append((None, value))
                 except (ValueError, TypeError):
                     continue
 
-            if not valid_values:
+            if not valid_data:
                 logger.warning(f"No valid values for {sensor_name}")
                 if zero_when_missing:
                     results[sensor_name] = 0
@@ -2422,9 +2433,13 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                     results[sensor_name] = None
                 continue
 
-            # Calculate average (sum / count)
-            average_value = sum(valid_values) / len(valid_values)
-            logger.info(f"{sensor_name}: {len(valid_values)} data points, average = {average_value:.3f} {unit or '?'}")
+            # Sort by timestamp
+            valid_data.sort(key=lambda x: x[0] if x[0] else start_time)
+
+            # Extract just values for backward compatibility
+            valid_values = [v for _, v in valid_data]
+
+            logger.info(f"{sensor_name}: {len(valid_values)} data points")
 
             # Check if this is an energy sensor or power sensor
             is_energy_sensor = unit and ('wh' in unit or 'kwh' in unit)
@@ -2442,19 +2457,50 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                 results[sensor_name] = energy
                 logger.info(f"✓ {sensor_name} (energy sensor, {unit}): {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
             else:
-                # Power sensor: Average power value
-                # For hourly calculation: average_power (W) * 1h = energy (Wh)
-                # Convert based on actual unit from sensor
+                # Power sensor: Use Riemann Integration (Trapezoidal method)
+                # This matches Home Assistant Energy Dashboard calculation
 
-                if unit and ('kw' in unit or 'kilowatt' in unit):
-                    # Already in kW - multiply by 1 hour = kWh
-                    energy = average_value
-                    logger.info(f"✓ {sensor_name} (power sensor, {unit}): avg={average_value:.3f} kW → {energy:.3f} kWh")
+                # Check if we have timestamps
+                has_timestamps = all(t is not None for t, _ in valid_data)
+
+                if has_timestamps and len(valid_data) >= 2:
+                    # Riemann Integration with Trapezoidal Rule
+                    total_energy_wh = 0.0
+
+                    for i in range(len(valid_data) - 1):
+                        t1, v1 = valid_data[i]
+                        t2, v2 = valid_data[i + 1]
+
+                        # Calculate time difference in hours
+                        time_diff_seconds = (t2 - t1).total_seconds()
+                        time_diff_hours = time_diff_seconds / 3600.0
+
+                        # Trapezoidal integration: average of two values * time
+                        avg_power = (v1 + v2) / 2.0
+
+                        # Energy = Power * Time
+                        # If unit is kW: energy in kWh
+                        # If unit is W: energy in Wh (will convert later)
+                        total_energy_wh += avg_power * time_diff_hours
+
+                    # Convert to kWh based on unit
+                    if unit and ('kw' in unit or 'kilowatt' in unit):
+                        energy = total_energy_wh  # Already in kWh
+                        logger.info(f"✓ {sensor_name} (power sensor, {unit}, Riemann): {total_energy_wh:.3f} kWh from {len(valid_data)} points")
+                    else:
+                        energy = total_energy_wh / 1000  # W to kWh
+                        logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}, Riemann): {total_energy_wh:.3f} Wh = {energy:.3f} kWh from {len(valid_data)} points")
                 else:
-                    # Assume Watts (default for power sensors)
-                    # Convert W to kWh: (W * 1h) / 1000
-                    energy = average_value / 1000
-                    logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}): avg={average_value:.3f} W → {energy:.3f} kWh")
+                    # Fallback to simple average if no timestamps
+                    average_value = sum(valid_values) / len(valid_values)
+                    logger.warning(f"{sensor_name}: No timestamps available, using simple average (less accurate)")
+
+                    if unit and ('kw' in unit or 'kilowatt' in unit):
+                        energy = average_value
+                        logger.info(f"✓ {sensor_name} (power sensor, {unit}, fallback avg): {average_value:.3f} kW → {energy:.3f} kWh")
+                    else:
+                        energy = average_value / 1000
+                        logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}, fallback avg): {average_value:.3f} W → {energy:.3f} kWh")
 
                 results[sensor_name] = energy
 
