@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0-beta.46] - 2025-11-07
+
+### Fixed
+- **Energy Import verwendet jetzt Riemann Integration** - Historische Verbrauchsdaten stimmen nun mit HA Energy Dashboard überein
+  - Problem: Power-Sensoren (z.B. `pv_total_sensor`) wurden mit einfachem Durchschnitt berechnet
+  - Folge: Importierte Werte wichen von HA Energy Dashboard ab, insbesondere bei ungleichmäßig verteilten Datenpunkten
+  - Lösung: Implementierung der Riemann Integration (Trapezoid-Methode) für Power-Sensoren
+  - Berechnung berücksichtigt jetzt Zeitstempel zwischen Datenpunkten (wie HA Energy Dashboard)
+  - Energy-Sensoren (kWh-Zähler) verwenden weiterhin Differenz-Berechnung
+
+### Technical
+- Updated `calculate_synchronized_energy()` to use Riemann Integration for power sensors
+- Trapezoidal rule: `energy = Σ((v1+v2)/2 * time_delta)` for all intervals
+- Parses and sorts timestamps from history data
+- Fallback to simple average if timestamps unavailable
+- Matches Home Assistant Energy Dashboard calculation method exactly
+
 ## [1.2.0-beta.10] - 2025-11-06
 
 ### Fixed
