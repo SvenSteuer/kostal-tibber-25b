@@ -2396,31 +2396,24 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
 
 def get_home_consumption_kwh(ha_client, config, timestamp):
     """
-    Calculate actual home consumption in kWh from grid, PV, and battery sensors.
+    Calculate actual home consumption in kWh from energy sensors (kWh counters).
 
-    Supports three modes:
-    1. Energy sensors (kWh counters) - most accurate, matches HA Energy Dashboard
-    2. Power sensors (W) with dual grid - calculates from averages
-    3. Legacy single grid sensor - signed values
-
-    Energy Sensor Formula (v1.2.0-beta.41):
+    Uses HA Energy Dashboard compatible calculation (v1.2.0-beta.42):
         Home = Grid_FROM + PV + Battery_Discharge - Grid_TO - Battery_Charge
         where Battery_Charge = Charge_from_Grid + Charge_from_PV
 
-    Power Sensor Formula:
-        Home = PV + (Grid_FROM - Grid_TO) + Battery_Power
-        where Battery_Power > 0 = discharging, < 0 = charging
+    This matches the HA Energy Dashboard exactly by using cumulative energy counters
+    instead of power sensors with averaging.
 
     Args:
         ha_client: Home Assistant API client
-        config: Configuration dict with optional keys:
-                - grid_from_energy_sensor: kWh counter for grid import (e.g., 'sensor.ksem_total_active_energy_from_grid')
+        config: Configuration dict with required keys:
+                - grid_from_energy_sensor: kWh counter for grid import
                 - grid_to_energy_sensor: kWh counter for grid export
+                - battery_discharge_sensor: kWh counter for battery discharge
                 - battery_charge_from_grid_sensor: kWh counter for battery charging from grid
                 - battery_charge_from_pv_sensor: kWh counter for battery charging from PV
-                - battery_discharge_sensor: kWh counter for battery discharge
                 - pv_total_sensor: W sensor for PV (will be integrated to kWh)
-                Falls back to power sensors if energy sensors not configured
         timestamp: Current timestamp
 
     Returns:
@@ -2433,169 +2426,77 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         end_time = timestamp
         start_time = timestamp - timedelta(hours=1)
 
-        # Check if energy sensors are configured (v1.2.0-beta.41)
+        # Get required energy sensors
         grid_from_energy = config.get('grid_from_energy_sensor')
         grid_to_energy = config.get('grid_to_energy_sensor')
         battery_discharge_energy = config.get('battery_discharge_sensor')
         battery_charge_grid_energy = config.get('battery_charge_from_grid_sensor')
         battery_charge_pv_energy = config.get('battery_charge_from_pv_sensor')
+        pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
 
-        if grid_from_energy and grid_to_energy and battery_discharge_energy:
-            # MODE 1: Energy sensors (kWh counters) - matches HA Energy Dashboard
-            logger.info("Using energy sensor mode (kWh counters) for consumption calculation")
+        # Validate configuration
+        if not grid_from_energy or not grid_to_energy or not battery_discharge_energy:
+            logger.error("Energy sensors not configured! Required: grid_from_energy_sensor, grid_to_energy_sensor, battery_discharge_sensor")
+            return None
 
-            # PV sensor is still power-based, will be integrated
-            pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
+        logger.info("Using energy sensor mode (kWh counters) for consumption calculation")
 
-            sensors_config = {
-                'grid_from': {
-                    'id': grid_from_energy,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                },
-                'grid_to': {
-                    'id': grid_to_energy,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                },
-                'pv': {
-                    'id': pv_sensor,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                },
-                'battery_discharge': {
-                    'id': battery_discharge_energy,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                }
+        sensors_config = {
+            'grid_from': {
+                'id': grid_from_energy,
+                'allow_negative': False,
+                'zero_when_missing': True
+            },
+            'grid_to': {
+                'id': grid_to_energy,
+                'allow_negative': False,
+                'zero_when_missing': True
+            },
+            'pv': {
+                'id': pv_sensor,
+                'allow_negative': False,
+                'zero_when_missing': True
+            },
+            'battery_discharge': {
+                'id': battery_discharge_energy,
+                'allow_negative': False,
+                'zero_when_missing': True
+            }
+        }
+
+        # Add battery charge sensors if configured
+        if battery_charge_grid_energy:
+            sensors_config['battery_charge_grid'] = {
+                'id': battery_charge_grid_energy,
+                'allow_negative': False,
+                'zero_when_missing': True
+            }
+        if battery_charge_pv_energy:
+            sensors_config['battery_charge_pv'] = {
+                'id': battery_charge_pv_energy,
+                'allow_negative': False,
+                'zero_when_missing': True
             }
 
-            # Add battery charge sensors if configured
-            if battery_charge_grid_energy:
-                sensors_config['battery_charge_grid'] = {
-                    'id': battery_charge_grid_energy,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                }
-            if battery_charge_pv_energy:
-                sensors_config['battery_charge_pv'] = {
-                    'id': battery_charge_pv_energy,
-                    'allow_negative': False,
-                    'zero_when_missing': True
-                }
+        logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
 
-            logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
-            energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
+        if not energy_results:
+            logger.warning("Failed to calculate energy")
+            return None
 
-            if not energy_results:
-                logger.warning("Failed to calculate energy")
-                return None
+        grid_from_kwh = energy_results.get('grid_from', 0)
+        grid_to_kwh = energy_results.get('grid_to', 0)
+        pv_kwh = energy_results.get('pv', 0)
+        battery_discharge_kwh = energy_results.get('battery_discharge', 0)
+        battery_charge_grid_kwh = energy_results.get('battery_charge_grid', 0)
+        battery_charge_pv_kwh = energy_results.get('battery_charge_pv', 0)
+        battery_charge_total_kwh = battery_charge_grid_kwh + battery_charge_pv_kwh
 
-            grid_from_kwh = energy_results.get('grid_from', 0)
-            grid_to_kwh = energy_results.get('grid_to', 0)
-            pv_kwh = energy_results.get('pv', 0)
-            battery_discharge_kwh = energy_results.get('battery_discharge', 0)
-            battery_charge_grid_kwh = energy_results.get('battery_charge_grid', 0)
-            battery_charge_pv_kwh = energy_results.get('battery_charge_pv', 0)
-            battery_charge_total_kwh = battery_charge_grid_kwh + battery_charge_pv_kwh
+        # Energy sensor formula: Home = Grid_FROM + PV + Battery_Discharge - Grid_TO - Battery_Charge
+        home_consumption_kwh = grid_from_kwh + pv_kwh + battery_discharge_kwh - grid_to_kwh - battery_charge_total_kwh
 
-            # Energy sensor formula: Home = Grid_FROM + PV + Battery_Discharge - Grid_TO - Battery_Charge
-            home_consumption_kwh = grid_from_kwh + pv_kwh + battery_discharge_kwh - grid_to_kwh - battery_charge_total_kwh
-
-            logger.info(f"Energy sensor calculation: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
-
-        else:
-            # MODE 2 & 3: Fall back to power sensor mode
-            pv_sensor = config.get('pv_total_sensor', 'sensor.ksem_sum_pv_power_inverter_dc')
-            battery_sensor = config.get('battery_power_sensor', 'sensor.ksem_battery_power')
-            grid_from_sensor = config.get('grid_from_sensor')
-            grid_to_sensor = config.get('grid_to_sensor')
-
-            if grid_from_sensor and grid_to_sensor:
-                # MODE 2: Dual grid power sensors
-                logger.info("Using power sensor mode (W) with dual grid sensors")
-
-                sensors_config = {
-                    'grid_from': {
-                        'id': grid_from_sensor,
-                        'allow_negative': False,
-                        'zero_when_missing': True
-                    },
-                    'grid_to': {
-                        'id': grid_to_sensor,
-                        'allow_negative': False,
-                        'zero_when_missing': True
-                    },
-                    'pv': {
-                        'id': pv_sensor,
-                        'allow_negative': False,
-                        'zero_when_missing': True
-                    },
-                    'battery': {
-                        'id': battery_sensor,
-                        'allow_negative': True,
-                        'zero_when_missing': True
-                    }
-                }
-
-                logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
-                energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
-
-                if not energy_results:
-                    logger.warning("Failed to calculate energy")
-                    return None
-
-                grid_from_kwh = energy_results.get('grid_from', 0)
-                grid_to_kwh = energy_results.get('grid_to', 0)
-                pv_kwh = energy_results.get('pv', 0)
-                battery_kwh = energy_results.get('battery', 0)
-
-                grid_net_kwh = grid_from_kwh - grid_to_kwh
-                home_consumption_kwh = pv_kwh + grid_net_kwh + battery_kwh
-
-                logger.info(f"Power sensor calculation: PV={pv_kwh:.3f} + GridNet={grid_net_kwh:.3f} + Battery={battery_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
-
-            else:
-                # MODE 3: Legacy single grid sensor
-                grid_sensor = config.get('home_consumption_sensor')
-                if not grid_sensor:
-                    logger.error("No grid sensors configured (need either energy sensors or power sensors)")
-                    return None
-
-                logger.info("Using legacy single grid sensor mode")
-
-                sensors_config = {
-                    'grid': {
-                        'id': grid_sensor,
-                        'allow_negative': True,
-                        'zero_when_missing': False
-                    },
-                    'pv': {
-                        'id': pv_sensor,
-                        'allow_negative': False,
-                        'zero_when_missing': True
-                    },
-                    'battery': {
-                        'id': battery_sensor,
-                        'allow_negative': True,
-                        'zero_when_missing': True
-                    }
-                }
-
-                logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
-                energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
-
-                if not energy_results:
-                    logger.warning("Failed to calculate energy")
-                    return None
-
-                grid_net_kwh = energy_results.get('grid', 0)
-                pv_kwh = energy_results.get('pv', 0)
-                battery_kwh = energy_results.get('battery', 0)
-
-                home_consumption_kwh = pv_kwh + grid_net_kwh + battery_kwh
-
-                logger.info(f"Legacy calculation: PV={pv_kwh:.3f} + GridNet={grid_net_kwh:.3f} + Battery={battery_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
+        logger.info(f"Energy sensor calculation: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
 
         # Validate result
         if home_consumption_kwh < 0:
