@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0-beta.48] - 2025-11-07
+
+### Added
+- **Debug-Logging für Datenbank-Operationen** - Verifiziert Speicherung und Abruf importierter Daten
+  - Zeigt DB-Schreibvorgänge mit Verifizierung für 31.10.
+  - Zählt Gesamtzahl der Einträge für 31.10. nach Import
+  - Zeigt alle DB-Einträge beim Abrufen für Diagramm
+  - Hilft zu diagnostizieren, warum Werte nicht im Diagramm erscheinen
+
+### Technical
+- Debug logging in `api_consumption_import_ha()` für DB-INSERT mit Verifizierung
+- Debug logging in `get_hourly_profile()` zeigt alle 31.10. Einträge
+- Zählt und loggt Gesamteinträge nach Import-Abschluss
+
 ## [1.2.0-beta.47] - 2025-11-07
 
 ### Added

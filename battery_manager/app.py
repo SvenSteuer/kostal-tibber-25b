@@ -1730,20 +1730,44 @@ def api_consumption_import_ha():
                 # Calculate consumption for this hour using the same function as live recording
                 consumption_kwh = get_home_consumption_kwh(ha_client, config, current_date + timedelta(hours=1))
 
+                # Debug logging for 31.10.
+                is_debug_date = current_date.date().isoformat() == '2024-10-31' and current_date.hour < 10
+
+                if is_debug_date:
+                    logger.info(f"🔍 DEBUG 31.10. - Speichere Stunde {current_date.strftime('%H:%M')}: consumption_kwh={consumption_kwh}")
+
                 if consumption_kwh is not None and consumption_kwh >= 0:
                     # Store in database
+                    timestamp_str = current_date.isoformat()
+
+                    if is_debug_date:
+                        logger.info(f"🔍 DEBUG 31.10. - Schreibe in DB: timestamp={timestamp_str}, hour={current_date.hour}, consumption={consumption_kwh:.3f}")
+
                     with sqlite3.connect(consumption_learner.db_path) as conn:
                         conn.execute("""
                             INSERT OR REPLACE INTO hourly_consumption
                             (timestamp, hour, consumption_kwh, is_manual, created_at)
                             VALUES (?, ?, ?, 1, ?)
                         """, (
-                            current_date.isoformat(),
+                            timestamp_str,
                             current_date.hour,
                             consumption_kwh,
                             datetime.now().astimezone().isoformat()
                         ))
                         conn.commit()
+
+                        # Verify it was written
+                        if is_debug_date:
+                            cursor = conn.execute("""
+                                SELECT timestamp, hour, consumption_kwh
+                                FROM hourly_consumption
+                                WHERE timestamp = ?
+                            """, (timestamp_str,))
+                            row = cursor.fetchone()
+                            if row:
+                                logger.info(f"✓ DEBUG 31.10. - Verifiziert in DB: {row[0]}, hour={row[1]}, consumption={row[2]:.3f}")
+                            else:
+                                logger.error(f"❌ DEBUG 31.10. - NICHT in DB gefunden: {timestamp_str}")
 
                     imported_hours += 1
 
@@ -1751,6 +1775,8 @@ def api_consumption_import_ha():
                         days_done = imported_hours // 24
                         add_log('INFO', f'... {days_done} Tag(e) importiert ({imported_hours} Stunden)')
                 else:
+                    if is_debug_date:
+                        logger.warning(f"⚠️ DEBUG 31.10. - Stunde {current_date.strftime('%H:%M')} übersprungen: consumption_kwh={consumption_kwh}")
                     skipped_hours += 1
             except Exception as e:
                 logger.error(f"Error importing hour {current_date}: {e}")
@@ -1759,6 +1785,15 @@ def api_consumption_import_ha():
             current_date += timedelta(hours=1)
 
         add_log('INFO', f'✅ HA Import abgeschlossen: {imported_hours} Stunden importiert, {skipped_hours} übersprungen')
+
+        # Debug: Count entries in DB for 31.10.2024
+        with sqlite3.connect(consumption_learner.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM hourly_consumption
+                WHERE DATE(timestamp) = '2024-10-31'
+            """)
+            count = cursor.fetchone()[0]
+            logger.info(f"🔍 DEBUG 31.10. - Total Einträge in DB für 31.10.: {count}")
 
         return jsonify({
             'success': True,
