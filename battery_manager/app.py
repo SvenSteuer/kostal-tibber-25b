@@ -1478,7 +1478,7 @@ def api_consumption_forecast_chart():
         # Get recorded values from database for today
         today_db_consumption = consumption_learner.get_today_consumption()
 
-        now = datetime.now()
+        now = datetime.now().astimezone()
         current_hour = now.hour
         current_minute = now.minute
 
@@ -1546,7 +1546,7 @@ def api_consumption_forecast_chart():
 
         if actual_consumption and forecast_consumption:
             errors = []
-            now = datetime.now()
+            now = datetime.now().astimezone()
             current_hour = now.hour
 
             for hour in range(current_hour):  # Only completed hours TODAY
@@ -2758,12 +2758,12 @@ def controller_loop():
         except Exception as e:
             logger.error(f"Error calculating initial rolling schedule: {e}", exc_info=True)
 
-    last_plan_update = datetime.now()
+    last_plan_update = datetime.now().astimezone()
 
     while True:
         try:
             # Update charging plan periodically (v0.3.0, enhanced v0.9.0)
-            now = datetime.now()
+            now = datetime.now().astimezone()
             if (last_plan_update is None or
                 (now - last_plan_update).total_seconds() > plan_update_interval):
                 update_charging_plan()
