@@ -1026,15 +1026,20 @@ def get_historical_pv_hourly(ha_client, pv_sensor: str, hours: int = 24) -> List
                 if state not in ['unknown', 'unavailable', None, '']:
                     power_value = float(state)
 
-                    # Validate power range (0 to reasonable max, e.g., 20 kW)
-                    if not (0 <= power_value <= 20000):
+                    # Validate power range (50W minimum to filter sensor noise/standby)
+                    # Values < 50W are treated as 0 (nighttime noise, inverter standby)
+                    if power_value < 50:
+                        power_value = 0
+                    elif power_value > 20000:  # Max 20kW sanity check
                         continue
 
-                    # Parse timestamp
-                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
-                    if timestamp_str:
-                        ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        data_points.append((ts, power_value))
+                    # Only add non-zero values to save memory
+                    if power_value > 0:
+                        # Parse timestamp
+                        timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                        if timestamp_str:
+                            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            data_points.append((ts, power_value))
             except (ValueError, TypeError):
                 continue
 
