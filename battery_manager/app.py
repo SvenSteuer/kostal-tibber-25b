@@ -2400,10 +2400,11 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
     Returns:
         dict: Energy values in kWh for each sensor, e.g.:
               {'grid': 1.234, 'pv': 2.345, 'battery': 0.123}
-              Returns None if critical data is missing
+              Returns None if NO sensors have any history data (indicating no data for this time period)
     """
     try:
         results = {}
+        any_sensor_has_data = False  # Track if at least one sensor has real data
 
         for sensor_name, sensor_config in sensors.items():
             sensor_id = sensor_config['id']
@@ -2423,6 +2424,7 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                 if zero_when_missing:
                     results[sensor_name] = 0
                     logger.info(f"✓ {sensor_name}: No data, using 0 (zero_when_missing=True)")
+                    # Don't set any_sensor_has_data=True, this is just a fallback zero
                     continue
                 else:
                     # For critical sensors without data
@@ -2464,12 +2466,16 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                 if zero_when_missing:
                     results[sensor_name] = 0
                     logger.info(f"✓ {sensor_name}: No valid data, using 0 (zero_when_missing=True)")
+                    # Don't set any_sensor_has_data=True, this is just a fallback zero
                 else:
                     results[sensor_name] = None
                 continue
 
             # Sort by timestamp
             valid_data.sort(key=lambda x: x[0] if x[0] else start_time)
+
+            # Mark that we have valid data from at least one sensor
+            any_sensor_has_data = True
 
             # Extract just values for backward compatibility
             valid_values = [v for _, v in valid_data]
@@ -2569,6 +2575,11 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                         logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}, fallback avg): {average_value:.3f} W → {energy:.3f} kWh")
 
                 results[sensor_name] = energy
+
+        # If no sensor had any real data (all were set to 0 via zero_when_missing), return None
+        if not any_sensor_has_data:
+            logger.info("⚠️ No sensors have history data for this time period - skipping")
+            return None
 
         return results
 
@@ -2701,15 +2712,9 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
 
         # Validate result
         if home_consumption_kwh < 0:
-            # Enhanced debug logging for negative values
-            if is_debug_date or home_consumption_kwh < -0.5:  # Log details if it's debug date or significantly negative
-                logger.warning(f"⚠️ Negative home consumption detected: {home_consumption_kwh:.3f} kWh")
-                logger.warning(f"  Breakdown: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f}")
-                logger.warning(f"  → Clamping to 0.0 kWh (sensor timing error)")
-
-            # Clamp to 0 instead of returning None to ensure complete hourly data
-            # HA Energy Dashboard also handles sensor errors by showing small/zero values
-            return 0.0
+            logger.warning(f"Negative home consumption {home_consumption_kwh:.3f} kWh - likely sensor error")
+            logger.warning(f"  Breakdown: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f}")
+            return None  # Skip hour with sensor errors
 
         return home_consumption_kwh
 
