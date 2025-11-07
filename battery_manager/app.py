@@ -2439,7 +2439,19 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
             # Extract just values for backward compatibility
             valid_values = [v for _, v in valid_data]
 
-            logger.info(f"{sensor_name}: {len(valid_values)} data points")
+            # Debug logging for 2024-10-31 (first 10 hours)
+            is_debug_date = start_time.date().isoformat() == '2024-10-31' and start_time.hour < 10
+            if is_debug_date:
+                logger.info(f"🔍 DEBUG 31.10. - {sensor_name} ({start_time.strftime('%H:%M')}): {len(valid_values)} data points")
+                # Show first 5 and last 5 data points
+                for idx, (ts, val) in enumerate(valid_data[:5]):
+                    logger.info(f"  [{idx}] {ts.strftime('%Y-%m-%d %H:%M:%S') if ts else 'no-ts'}: {val:.3f}")
+                if len(valid_data) > 10:
+                    logger.info(f"  ... ({len(valid_data) - 10} more points)")
+                    for idx, (ts, val) in enumerate(valid_data[-5:], start=len(valid_data)-5):
+                        logger.info(f"  [{idx}] {ts.strftime('%Y-%m-%d %H:%M:%S') if ts else 'no-ts'}: {val:.3f}")
+            else:
+                logger.info(f"{sensor_name}: {len(valid_values)} data points")
 
             # Check if this is an energy sensor or power sensor
             is_energy_sensor = unit and ('wh' in unit or 'kwh' in unit)
@@ -2455,7 +2467,11 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                     energy = energy / 1000
 
                 results[sensor_name] = energy
-                logger.info(f"✓ {sensor_name} (energy sensor, {unit}): {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
+
+                if is_debug_date:
+                    logger.info(f"✓ {sensor_name} (energy sensor, {unit}): {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
+                else:
+                    logger.info(f"✓ {sensor_name} (energy sensor, {unit}): {first_value:.3f} → {last_value:.3f} = {energy:.3f} kWh")
             else:
                 # Power sensor: Use Riemann Integration (Trapezoidal method)
                 # This matches Home Assistant Energy Dashboard calculation
@@ -2466,6 +2482,10 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                 if has_timestamps and len(valid_data) >= 2:
                     # Riemann Integration with Trapezoidal Rule
                     total_energy_wh = 0.0
+
+                    # Debug: Show integration steps for 31.10.
+                    if is_debug_date:
+                        logger.info(f"🔍 DEBUG 31.10. - {sensor_name} Riemann Integration:")
 
                     for i in range(len(valid_data) - 1):
                         t1, v1 = valid_data[i]
@@ -2481,15 +2501,26 @@ def calculate_synchronized_energy(ha_client, sensors, start_time, end_time):
                         # Energy = Power * Time
                         # If unit is kW: energy in kWh
                         # If unit is W: energy in Wh (will convert later)
-                        total_energy_wh += avg_power * time_diff_hours
+                        energy_segment = avg_power * time_diff_hours
+                        total_energy_wh += energy_segment
+
+                        # Debug: Show first 3 and last 3 integration steps
+                        if is_debug_date and (i < 3 or i >= len(valid_data) - 4):
+                            logger.info(f"  [{i}→{i+1}] {v1:.1f}→{v2:.1f} avg={avg_power:.1f} Δt={time_diff_hours:.4f}h → {energy_segment:.3f}")
 
                     # Convert to kWh based on unit
                     if unit and ('kw' in unit or 'kilowatt' in unit):
                         energy = total_energy_wh  # Already in kWh
-                        logger.info(f"✓ {sensor_name} (power sensor, {unit}, Riemann): {total_energy_wh:.3f} kWh from {len(valid_data)} points")
+                        if is_debug_date:
+                            logger.info(f"✓ {sensor_name} TOTAL: {total_energy_wh:.3f} kWh (unit: {unit})")
+                        else:
+                            logger.info(f"✓ {sensor_name} (power sensor, {unit}, Riemann): {total_energy_wh:.3f} kWh from {len(valid_data)} points")
                     else:
                         energy = total_energy_wh / 1000  # W to kWh
-                        logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}, Riemann): {total_energy_wh:.3f} Wh = {energy:.3f} kWh from {len(valid_data)} points")
+                        if is_debug_date:
+                            logger.info(f"✓ {sensor_name} TOTAL: {total_energy_wh:.3f} Wh = {energy:.3f} kWh (unit: {unit or 'W assumed'})")
+                        else:
+                            logger.info(f"✓ {sensor_name} (power sensor, {unit or 'W assumed'}, Riemann): {total_energy_wh:.3f} Wh = {energy:.3f} kWh from {len(valid_data)} points")
                 else:
                     # Fallback to simple average if no timestamps
                     average_value = sum(valid_values) / len(valid_values)
@@ -2595,7 +2626,15 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
                 'zero_when_missing': True
             }
 
-        logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        # Debug logging for 31.10.
+        is_debug_date = timestamp.date().isoformat() == '2024-10-31' and timestamp.hour <= 10
+
+        if is_debug_date:
+            logger.info(f"🔍 DEBUG 31.10. - Calculating energy for {timestamp.strftime('%Y-%m-%d %H:%M')}")
+            logger.info(f"  Time range: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
+        else:
+            logger.info(f"Calculating energy for hour ending {timestamp.strftime('%Y-%m-%d %H:%M')}")
+
         energy_results = calculate_synchronized_energy(ha_client, sensors_config, start_time, end_time)
 
         if not energy_results:
@@ -2613,7 +2652,17 @@ def get_home_consumption_kwh(ha_client, config, timestamp):
         # Energy sensor formula: Home = Grid_FROM + PV + Battery_Discharge - Grid_TO - Battery_Charge
         home_consumption_kwh = grid_from_kwh + pv_kwh + battery_discharge_kwh - grid_to_kwh - battery_charge_total_kwh
 
-        logger.info(f"Energy sensor calculation: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
+        if is_debug_date:
+            logger.info(f"🔍 DEBUG 31.10. - Energy sensor calculation ({timestamp.strftime('%H:%M')}):")
+            logger.info(f"  Grid FROM:      {grid_from_kwh:.3f} kWh")
+            logger.info(f"  PV:             {pv_kwh:.3f} kWh")
+            logger.info(f"  Bat Discharge:  {battery_discharge_kwh:.3f} kWh")
+            logger.info(f"  Grid TO:       -{grid_to_kwh:.3f} kWh")
+            logger.info(f"  Bat Charge:    -{battery_charge_total_kwh:.3f} kWh (grid:{battery_charge_grid_kwh:.3f} + pv:{battery_charge_pv_kwh:.3f})")
+            logger.info(f"  ───────────────────────────")
+            logger.info(f"  HOME:           {home_consumption_kwh:.3f} kWh")
+        else:
+            logger.info(f"Energy sensor calculation: GridFROM={grid_from_kwh:.3f} + PV={pv_kwh:.3f} + BatDischarge={battery_discharge_kwh:.3f} - GridTO={grid_to_kwh:.3f} - BatCharge={battery_charge_total_kwh:.3f} = Home={home_consumption_kwh:.3f} kWh")
 
         # Validate result
         if home_consumption_kwh < 0:
