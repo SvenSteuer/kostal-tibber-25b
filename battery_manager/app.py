@@ -875,25 +875,27 @@ def api_charging_status():
 
 def get_historical_soc_interpolated(ha_client, soc_sensor: str, hours: int = 24) -> List[float]:
     """
-    Get historical SOC values for the last N hours with linear interpolation (v1.2.0-beta.14)
+    Get historical SOC values for today's calendar hours with linear interpolation (v1.2.0-beta.40)
 
     The SOC sensor typically has sparse data points (only when value changes).
     This function interpolates between data points to get one value per hour.
+    Returns 24 values for today 0:00 to 23:00 (calendar hours, not rolling).
 
     Args:
         ha_client: Home Assistant client
         soc_sensor: SOC sensor entity ID (e.g., 'sensor.zwh8_8500_battery_soc')
-        hours: Number of hours to retrieve (default: 24)
+        hours: Number of hours to retrieve (default: 24, always starts at 0:00 today)
 
     Returns:
-        List[float]: SOC values for each hour (24 values from oldest to newest)
+        List[float]: SOC values for each hour (24 values from 0:00-23:00 today)
                      Returns None if error or no data
     """
     try:
         from datetime import datetime, timedelta
 
         now = datetime.now().astimezone()
-        start_time = now - timedelta(hours=hours)
+        # Start at today 0:00 (calendar hours, not rolling)
+        start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # Fetch SOC history
         logger.info(f"Fetching historical SOC from {soc_sensor} for last {hours} hours...")
@@ -988,26 +990,26 @@ def get_historical_soc_interpolated(ha_client, soc_sensor: str, hours: int = 24)
 
 def get_historical_pv_hourly(ha_client, pv_sensor: str, hours: int = 24) -> List[float]:
     """
-    Get historical PV production values for the last N hours (v1.2.0-beta.37)
+    Get historical PV production values for today's calendar hours (v1.2.0-beta.40)
 
     Calculates hourly energy production in kWh by integrating power data from sensor.
-    For past hours: uses real historical data from Home Assistant
-    For future hours: will be filled from Forecast.Solar API
+    Returns 24 values for today 0:00 to 23:00 (calendar hours, not rolling).
 
     Args:
         ha_client: Home Assistant client
         pv_sensor: PV power sensor entity ID (e.g., 'sensor.ksem_sum_pv_power_inverter_dc')
-        hours: Number of hours to retrieve (default: 24)
+        hours: Number of hours to retrieve (default: 24, always starts at 0:00 today)
 
     Returns:
-        List[float]: PV energy production in kWh for each hour (24 values)
+        List[float]: PV energy production in kWh for each hour (24 values from 0:00-23:00 today)
                      Returns None if error or no data
     """
     try:
         from datetime import datetime, timedelta
 
         now = datetime.now().astimezone()
-        start_time = now - timedelta(hours=hours)
+        # Start at today 0:00 (calendar hours, not rolling)
+        start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # Fetch PV history
         logger.info(f"Fetching historical PV from {pv_sensor} for last {hours} hours...")
@@ -1026,15 +1028,20 @@ def get_historical_pv_hourly(ha_client, pv_sensor: str, hours: int = 24) -> List
                 if state not in ['unknown', 'unavailable', None, '']:
                     power_value = float(state)
 
-                    # Validate power range (0 to reasonable max, e.g., 20 kW)
-                    if not (0 <= power_value <= 20000):
+                    # Validate power range (50W minimum to filter sensor noise/standby)
+                    # Values < 50W are treated as 0 (nighttime noise, inverter standby)
+                    if power_value < 50:
+                        power_value = 0
+                    elif power_value > 20000:  # Max 20kW sanity check
                         continue
 
-                    # Parse timestamp
-                    timestamp_str = entry.get('last_changed') or entry.get('last_updated')
-                    if timestamp_str:
-                        ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        data_points.append((ts, power_value))
+                    # Only add non-zero values to save memory
+                    if power_value > 0:
+                        # Parse timestamp
+                        timestamp_str = entry.get('last_changed') or entry.get('last_updated')
+                        if timestamp_str:
+                            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            data_points.append((ts, power_value))
             except (ValueError, TypeError):
                 continue
 
