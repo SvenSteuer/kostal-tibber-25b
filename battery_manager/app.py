@@ -1801,6 +1801,40 @@ def api_clear_manual_data():
             'error': str(e)
         }), 500
 
+@app.route('/api/consumption_import/clear_all', methods=['POST'])
+def api_clear_all_data():
+    """Clear ALL consumption data (manual + learned) - v1.2.0-beta.44"""
+    try:
+        if not consumption_learner:
+            return jsonify({
+                'success': False,
+                'error': 'Consumption learning not enabled'
+            }), 400
+
+        import sqlite3
+        with sqlite3.connect(consumption_learner.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM hourly_consumption")
+            total_before = cursor.fetchone()[0]
+
+            conn.execute("DELETE FROM hourly_consumption")
+            conn.commit()
+
+        add_log('INFO', f'🗑️ ALLE Verbrauchsdaten gelöscht: {total_before} Einträge')
+        logger.info(f"Cleared ALL consumption data: {total_before} entries deleted")
+
+        return jsonify({
+            'success': True,
+            'deleted': total_before
+        })
+
+    except Exception as e:
+        logger.error(f"Error clearing all data: {e}", exc_info=True)
+        add_log('ERROR', f'Fehler beim Löschen aller Daten: {str(e)}')
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/consumption_data', methods=['GET'])
 def api_consumption_data_get():
     """Get all consumption data for editing (v0.4.0)"""
