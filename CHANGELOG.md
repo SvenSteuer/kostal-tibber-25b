@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0-beta.51] - 2025-11-07
+
+### Fixed
+- **Import überschreibt jetzt automatisch gelernte Daten** - Importierte historische Werte werden korrekt angezeigt
+  - Problem: Automatische stündliche Aufzeichnung (`is_manual=0`) überschrieb importierte Werte (`is_manual=1`)
+  - Lösung: Import löscht jetzt ALLE Einträge (manual + learned) für einen timestamp vor dem Einfügen
+  - Stellt sicher, dass nur der importierte Wert für diesen timestamp existiert
+  - API zeigt nun korrekt die importierten historischen Werte an
+
+### Technical
+- Import-Funktion verwendet `DELETE WHERE timestamp = ?` vor `INSERT`
+- Ersetzt `INSERT OR REPLACE` durch explizites DELETE + INSERT
+- Verhindert dass automatische Aufzeichnungen mit neuerem `created_at` die importierten Werte verdrängen
+
 ## [1.2.0-beta.50] - 2025-11-07
 
 ### Fixed
