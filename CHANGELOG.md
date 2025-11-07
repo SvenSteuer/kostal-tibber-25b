@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0-beta.47] - 2025-11-07
+
+### Added
+- **Detailliertes Debug-Logging für 31.10.2024** - Umfangreiche Logs für erste 10 Stunden
+  - Zeigt alle Sensordaten mit Zeitstempeln
+  - Riemann Integration Schritte (erste 3 und letzte 3 Intervalle)
+  - Detaillierte Hausverbrauch-Berechnung mit allen Komponenten
+  - Hilft bei Diagnose von Diskrepanzen zwischen Import und HA Energy Dashboard
+
+### Technical
+- Debug logging aktiviert für timestamp.date() == '2024-10-31' und hour < 10
+- Zeigt erste 5 und letzte 5 Datenpunkte mit Zeitstempeln
+- Detaillierte Riemann Integration Schritte für Power-Sensoren
+- Formatierte Ausgabe der finalen Home-Consumption-Berechnung
+
 ## [1.2.0-beta.46] - 2025-11-07
 
 ### Fixed
