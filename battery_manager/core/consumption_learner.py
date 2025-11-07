@@ -75,7 +75,7 @@ class ConsumptionLearner:
 
         with sqlite3.connect(self.db_path) as conn:
             # Generate 28 days of baseline data
-            now = datetime.now()
+            now = datetime.now().astimezone()
             start_date = now - timedelta(days=self.learning_days)
 
             count = 0
@@ -100,7 +100,7 @@ class ConsumptionLearner:
                         timestamp.isoformat(),
                         hour,
                         consumption,
-                        datetime.now().isoformat()
+                        datetime.now().astimezone().isoformat()
                     ))
                     count += 1
 
@@ -178,7 +178,7 @@ class ConsumptionLearner:
                             timestamp.isoformat(),
                             hour,
                             consumption,
-                            datetime.now().isoformat()
+                            datetime.now().astimezone().isoformat()
                         ))
                         imported_count += 1
 
@@ -336,7 +336,7 @@ class ConsumptionLearner:
                 logger.info(f"Battery: {battery_sensor}")
 
             # Calculate time range
-            end_time = datetime.now()
+            end_time = datetime.now().astimezone()
             start_time = end_time - timedelta(days=days)
             logger.info(f"Time range: {start_time.isoformat()} to {end_time.isoformat()}")
 
@@ -839,7 +839,7 @@ class ConsumptionLearner:
                 rounded_timestamp.isoformat(),
                 hour,
                 consumption_kwh,
-                datetime.now().isoformat()
+                datetime.now().astimezone().isoformat()
             ))
             conn.commit()
 
@@ -850,7 +850,7 @@ class ConsumptionLearner:
 
     def _cleanup_old_data(self):
         """Remove data older than learning period"""
-        cutoff = datetime.now() - timedelta(days=self.learning_days)
+        cutoff = datetime.now().astimezone() - timedelta(days=self.learning_days)
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
