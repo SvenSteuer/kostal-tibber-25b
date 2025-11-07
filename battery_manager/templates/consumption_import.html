@@ -68,13 +68,41 @@
         color: white;
         padding: 0.25rem;
     }
+    .ha-actions {
+        margin-top: 1rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+    }
+    .danger-zone {
+        margin-top: 1.5rem;
+        padding: 1.25rem;
+        border-radius: 6px;
+        border: 1px solid rgba(244,67,54,0.5);
+        background: rgba(244,67,54,0.12);
+    }
+    .danger-zone h3 {
+        margin: 0 0 0.5rem 0;
+        font-size: 1.1rem;
+        color: #ff8a65;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+    }
+    .danger-zone p {
+        margin: 0 0 1rem 0;
+        color: rgba(255,255,255,0.85);
+        font-size: 0.95rem;
+    }
     .btn-danger {
         background: #f44336;
         color: white;
         border: none;
-        padding: 0.5rem 1rem;
+        padding: 0.75rem 1.5rem;
         cursor: pointer;
         border-radius: 4px;
+        font-weight: 600;
+        box-shadow: 0 2px 6px rgba(244,67,54,0.35);
     }
     .btn-danger:hover {
         background: #d32f2f;
@@ -94,9 +122,17 @@
         <p>Importiere automatisch die letzten 28 Tage aus deinem Home Assistant Verbrauchssensor.</p>
         <p><strong>Sensor:</strong> <code>{{ config.get('home_consumption_sensor', 'Nicht konfiguriert') }}</code></p>
 
-        <div style="margin-top: 1rem;">
+        <div class="ha-actions">
             <button onclick="importFromHA()" class="btn btn-primary">
                 📥 Jetzt aus Home Assistant importieren
+            </button>
+        </div>
+
+        <div class="danger-zone">
+            <h3>⚠️ Gesamte Verbrauchsdatenbank leeren</h3>
+            <p>Entfernt alle importierten und gelernten Verbrauchsdaten aus der Datenbank. Dieser Vorgang kann nicht rückgängig gemacht werden.</p>
+            <button onclick="clearAllData()" class="btn btn-danger">
+                🗑️ Datenbank jetzt leeren
             </button>
         </div>
 
@@ -317,6 +353,41 @@ function importFromHA() {
                 ${error}
             </div>
         `;
+    });
+}
+
+function clearAllData() {
+    if (!confirm('⚠️ Wirklich die gesamte Verbrauchsdatenbank löschen?\n\nDies entfernt ALLE importierten und gelernten Daten.')) {
+        return;
+    }
+
+    showLoading('Lösche alle Verbrauchsdaten...');
+
+    fetch(apiUrl('api/consumption_import/clear_all'), {
+        method: 'POST'
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideLoading();
+        if (data.success) {
+            const deleted = data.deleted || 0;
+            showNotification('success', `🗑️ Datenbank geleert (${deleted} Einträge entfernt)`);
+            document.getElementById('haImportResult').innerHTML = `
+                <div style="color: #FFC107; padding: 1rem; background: rgba(255,193,7,0.1); border-radius: 4px;">
+                    <strong>🗑️ Datenbank geleert</strong><br>
+                    ${deleted} Einträge entfernt
+                </div>
+            `;
+            document.getElementById('importResult').innerHTML = '';
+            tableData = [];
+            renderTable();
+        } else {
+            showNotification('error', `❌ Löschen fehlgeschlagen: ${data.error}`);
+        }
+    })
+    .catch(error => {
+        hideLoading();
+        showNotification('error', 'Fehler beim Löschen: ' + error);
     });
 }
 
